@@ -286,6 +286,20 @@ prompts:
       acknowledge_security: true           # your decision, per prompt, in config
 ```
 
+**Windows from other programs** (for example a notification pop-up) that cover the page are first given `prompts.obstruction_wait_s` (default 30 s) to close on their own. If one stays, the document pauses or is set aside. To handle a specific program's window automatically, add a rule with `scope: other`, for example:
+
+```yaml
+    - name: pdfmonitor-notification
+      scope: other              # viewer (default) | other | any
+      class_re: 'PDFMonitor\.exe'
+      title_re: '^NotifyView$'
+      action: wait              # or click (with button:), or ignore (the window is then captured too)
+      wait_s: 5
+      max_times: 24
+```
+
+**`config.yaml` next to `Capture.bat` is loaded automatically**, so drag-and-drop runs use your settings. A commented starter file is included in the release.
+
 Rules are evaluated in order: yours first, then the profile's. A `click`/`keys` rule on a dialog whose text matches `prompts.security_text_re` (JavaScript, trust, certificate, password, permission, allow/block, protected view, sign-in, licence) is **not** executed unless the rule sets `acknowledge_security: true`. Without it, the harness pauses for the operator. Each rule acts at most `max_times` times per run; after that the harness assumes a loop and asks the operator.
 
 ---

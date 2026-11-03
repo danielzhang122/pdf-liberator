@@ -82,6 +82,17 @@ def _apply_overrides(raw: dict, args) -> dict:
     return raw
 
 
+def _config_path(args) -> Path | None:
+    """--config if given, else config.yaml next to Capture.bat (the install folder), if present."""
+    if getattr(args, "config", None):
+        return Path(args.config)
+    auto = Path(__file__).resolve().parent.parent / "config.yaml"
+    if auto.is_file():
+        print(f"Using settings from {auto}")
+        return auto
+    return None
+
+
 def _resolve_viewer(raw: dict) -> dict:
     """``viewer.profile: auto`` (the default) -> the reader installed on this machine."""
     v = raw.setdefault("viewer", {})
@@ -117,7 +128,7 @@ def cmd_run(args) -> int:
     _enable_dpi()
     from .runner import Harness
 
-    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
+    raw = _resolve_viewer(_apply_overrides(load_raw(_config_path(args)), args))
     cfg = build_config(raw)
     if not cfg.document.path:
         raise ConfigError("give the document: `run C:\\path\\file.pdf` (or document.path in a config file)")
@@ -239,7 +250,7 @@ def cmd_calibrate(args) -> int:
     from .manual import ManualCheckpoint
     from .stability import wait_for_stable
 
-    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
+    raw = _resolve_viewer(_apply_overrides(load_raw(_config_path(args)), args))
     cfg = build_config(raw)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -340,7 +351,7 @@ def cmd_batch(args) -> int:
         return 0
     _require_windows()
     _enable_dpi()
-    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
+    raw = _resolve_viewer(_apply_overrides(load_raw(_config_path(args)), args))
     raw.setdefault("document", {}).pop("path", None)
     build_config(deep_merge(raw, {"document": {"path": str(items[0].path)}}))   # validate once up front
     if args.no_pdf:
@@ -361,7 +372,7 @@ def cmd_batch(args) -> int:
 
 def cmd_doctor(args) -> int:
     from .doctor import run_doctor
-    raw = load_raw(Path(args.config)) if args.config else {}
+    raw = load_raw(_config_path(args))
     return run_doctor(raw, Path(args.out_dir) if args.out_dir else Path.cwd())
 
 

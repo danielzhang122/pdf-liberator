@@ -1,0 +1,22 @@
+# Settings used automatically by Capture.bat (everything is optional).
+# Full list of options: config.example.yaml. Remove the leading "#" to enable a line.
+
+prompts:
+  # Pop-ups from other programs that cover the page are given this long to close
+  # on their own before the document is set aside.
+  obstruction_wait_s: 30
+
+  rules:
+    # Example: a notification window from another program (here PDFMonitor's
+    # "NotifyView"). Pick ONE action:
+    #   wait   - wait for it to close (up to wait_s x max_times seconds)
+    #   click  - press one of its buttons (button: <exact button text>)
+    #   ignore - carry on anyway (the window will appear in the captured pages)
+    #
+    # - name: pdfmonitor-notification
+    #   scope: other
+    #   class_re: 'PDFMonitor\.exe'
+    #   title_re: '^NotifyView$'
+    #   action: wait
+    #   wait_s: 5
+    #   max_times: 24

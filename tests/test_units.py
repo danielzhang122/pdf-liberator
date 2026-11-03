@@ -140,7 +140,7 @@ def _dlg(title, text, buttons=("OK", "Cancel"), owned=True, h=1):
     return DialogInfo(h, title, "#32770", 1, Rect(0, 0, 100, 100), [text], list(buttons), owned)
 
 
-def _handler(adapter, rules, answers):
+def _handler(adapter, rules, answers, obstruction_wait_s=0.0):
     calls = []
 
     def checkpoint(reason, msg):
@@ -153,7 +153,7 @@ def _handler(adapter, rules, answers):
             return "retry"
         return a
 
-    cfg = PromptsConfig(rules=[PromptRule(**r) for r in rules])
+    cfg = PromptsConfig(rules=[PromptRule(**r) for r in rules], obstruction_wait_s=obstruction_wait_s)
     return PromptHandler(cfg, adapter, checkpoint, EmergencyStopMonitor(None, None)), calls
 
 
@@ -226,3 +226,52 @@ def test_example_config_is_valid():
     raw["viewer"]["profile"] = "acrobat"
     names = [r.name for r in build_config(raw).prompts.rules]
     assert "javascript-prompt-requires-operator" in names  # profile rules appended
+
+
+class _VanishingAdapter(_DlgAdapter):
+    """A foreign pop-up that closes by itself after a few checks."""
+
+    def __init__(self, dialogs, vanish_after):
+        super().__init__(dialogs)
+        self.calls = 0
+        self.vanish_after = vanish_after
+
+    def list_dialogs(self, _r):
+        self.calls += 1
+        if self.calls > self.vanish_after:
+            self.dialogs.clear()
+        return list(self.dialogs)
+
+
+def test_transient_obstruction_is_waited_out(monkeypatch):
+    ad = _VanishingAdapter([_dlg("NotifyView", "Document opened", ["Open"], owned=False)], vanish_after=3)
+    h, calls = _handler(ad, [], [], obstruction_wait_s=30)
+    monkeypatch.setattr(h.estop, "sleep", lambda s: None)
+    h.handle(Rect(0, 0, 10, 10))
+    assert calls == [] and ad.calls == 4
+    assert any(r["action"] == "obstruction_wait" for r in h.stats.handled)
+
+
+def test_persistent_obstruction_still_checkpoints_after_wait(monkeypatch):
+    ad = _DlgAdapter([_dlg("NotifyView", "Document opened", ["Open"], owned=False)])
+    h, calls = _handler(ad, [], ["dismiss"], obstruction_wait_s=0.05)
+    h.handle(Rect(0, 0, 10, 10))
+    assert calls == ["obstruction"]
+
+
+def test_rules_for_other_apps_need_scope(monkeypatch):
+    rule = {"name": "notify", "class_re": "#32770", "title_re": "^NotifyView$", "action": "click",
+            "button": "Open"}
+    ad = _DlgAdapter([_dlg("NotifyView", "Document opened", ["Open"], owned=False)])
+    h, calls = _handler(ad, [rule], ["dismiss"])             # default scope: viewer -> not applied
+    h.handle(Rect(0, 0, 10, 10))
+    assert ad.clicked == [] and calls == ["obstruction"]
+    ad = _DlgAdapter([_dlg("NotifyView", "Document opened", ["Open"], owned=False)])
+    h, calls = _handler(ad, [{**rule, "scope": "other"}], [])
+    h.handle(Rect(0, 0, 10, 10))
+    assert ad.clicked == [("NotifyView", "Open")] and calls == []
+
+
+def test_commented_out_config_sections_load():
+    cfg = build_config({"prompts": {"rules": None}, "ocr": None})
+    assert cfg.prompts.rules == [] and cfg.ocr.lang == "eng"

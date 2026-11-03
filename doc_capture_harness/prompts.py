@@ -18,6 +18,7 @@ Policy (deliberately conservative):
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -82,32 +83,52 @@ class PromptHandler:
             self.accepted_handles.add(d.handle)
         return answer
 
+    def _rule_for(self, d: DialogInfo) -> Optional[PromptRule]:
+        scopes = ("viewer", "any") if d.owned_by_viewer else ("other", "any")
+        return next((r for r in self.cfg.rules if r.scope in scopes and rule_matches(r, d)), None)
+
     def handle(self, doc_rect: Optional[Rect], max_rounds: int = 25) -> int:
         """Process dialogs until none remain that need action. Returns #actions."""
         actions = 0
-        for _ in range(max_rounds):
+        rounds = 0
+        first_seen: dict[int, float] = {}       # obstruction handle -> when first seen
+        while rounds < max_rounds:
             self.estop.check()
             dialogs = [d for d in self.adapter.list_dialogs(doc_rect) if d.handle not in self.accepted_handles]
             if not dialogs:
                 return actions
             d = dialogs[0]
-            actions += 1
-            if not d.owned_by_viewer:
+            rule = self._rule_for(d)
+            if not d.owned_by_viewer and rule is None:
+                # Another application's window over the page. Most are transient
+                # notifications: give it time to go away before involving anyone.
+                if d.handle not in first_seen:
+                    first_seen[d.handle] = time.monotonic()
+                    if self.cfg.obstruction_wait_s > 0:
+                        self._note(d, "obstruction_wait", None, wait_s=self.cfg.obstruction_wait_s)
+                if time.monotonic() - first_seen[d.handle] < self.cfg.obstruction_wait_s:
+                    self.estop.sleep(1.0)
+                    continue
+                rounds += 1
+                actions += 1
                 self._note(d, "obstruction", None)
                 if self.cfg.obstruction_action == "abort":
                     raise UserAbort(f"window {d.title!r} obstructs the document viewport")
                 self.checkpoint("obstruction",
-                                f"Another window ({d.title!r}, class {d.class_name}) covers the document "
-                                "area and would be captured. Move or close it, then choose Retry.")
+                                f"Another window ({d.title!r}, class {d.class_name}) stayed over the document "
+                                f"area for {self.cfg.obstruction_wait_s:.0f}s and would be captured. Move or close "
+                                "it, or add a prompts rule with scope: other for it, then choose Retry.")
+                first_seen.pop(d.handle, None)
                 continue
-            rule = next((r for r in self.cfg.rules if rule_matches(r, d)), None)
+            rounds += 1
+            actions += 1
             if rule is None:
                 self._note(d, "unknown", None)
                 if self.cfg.unknown_action == "abort":
                     raise UserAbort(f"unknown dialog {d.title!r} (prompts.unknown_action=abort)")
                 self._manual(d, "An unfamiliar dialog appeared in the reader.")
                 continue
-            name = rule.name or rule.text_re or rule.title_re or "rule"
+            name = rule.name or rule.text_re or rule.title_re or rule.class_re or "rule"
             n = self.rule_counts.get(name, 0) + 1
             self.rule_counts[name] = n
             if rule.action == "ignore":

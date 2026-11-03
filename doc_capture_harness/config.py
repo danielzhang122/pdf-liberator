@@ -219,12 +219,17 @@ class PromptRule:
     max_times: int = 5
     # Required to auto-click/keys on a dialog whose text looks security-related.
     acknowledge_security: bool = False
+    # Which windows the rule applies to: the reader's own dialogs ("viewer"),
+    # other applications' windows covering the page ("other"), or both ("any").
+    # Note: "ignore" on another app's window means it will appear in captures.
+    scope: str = "viewer"
 
 
 @dataclass
 class PromptsConfig:
     unknown_action: str = "manual"     # manual | abort  (never auto-dismiss)
     obstruction_action: str = "manual"  # foreign window over document: manual | abort
+    obstruction_wait_s: float = 30.0    # let transient pop-ups from other apps disappear first
     security_text_re: list[str] = field(default_factory=lambda: list(DEFAULT_SECURITY_RE))
     rules: list[PromptRule] = field(default_factory=list)
     startup_timeout_s: float = 60.0
@@ -328,6 +333,8 @@ def _convert(tp, value, path):
         inner = [a for a in args if a is not type(None)]
         return _convert(inner[0], value, path)
     if origin is list:
+        if value is None:            # an empty YAML section (e.g. everything commented out)
+            return []
         if not isinstance(value, list):
             raise ConfigError(f"{path}: expected a list")
         return [_convert(args[0], v, f"{path}[{i}]") for i, v in enumerate(value)]
@@ -380,7 +387,7 @@ def build_config(raw: dict) -> HarnessConfig:
     # Profile-supplied prompt rules are appended after user rules (user rules win).
     profile_rules = PROFILES[profile].get("_prompt_rules", [])
     raw["viewer"].pop("_prompt_rules", None)
-    raw["prompts"]["rules"] = list(raw["prompts"]["rules"]) + list(profile_rules)
+    raw["prompts"]["rules"] = list(raw["prompts"].get("rules") or []) + list(profile_rules)
     cfg = _build(HarnessConfig, raw, "config")
     validate(cfg)
     return cfg
@@ -417,6 +424,7 @@ def validate(cfg: HarnessConfig) -> None:
         check(any([r.title_re, r.text_re, r.class_re]), f"{where}: needs at least one of title_re/text_re/class_re")
         check(r.action != "click" or r.button, f"{where}: action 'click' requires 'button'")
         check(r.action != "keys" or r.keys, f"{where}: action 'keys' requires 'keys'")
+        check(r.scope in ("viewer", "other", "any"), f"{where}: scope must be viewer, other or any")
     check(cfg.pdf.page_size in ("original", "letter", "a4", "pixels"),
           "pdf.page_size must be original, letter, a4 or pixels")
     check(cfg.pdf.fallback_page_size in ("letter", "a4"), "pdf.fallback_page_size must be letter or a4")

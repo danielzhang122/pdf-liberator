@@ -5,8 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = ["Capture.bat", "install.ps1", "START-HERE.txt", "README.md", "requirements.txt",
-         "config.example.yaml", "tools/compare_text.py"]
-CRLF = {".bat", ".ps1", ".txt"}
+         "config.example.yaml", "config.yaml", "tools/compare_text.py"]
+CRLF = {".bat", ".ps1", ".txt", ".yaml"}
 
 
 def main() -> None:
