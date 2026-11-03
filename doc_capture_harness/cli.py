@@ -3,6 +3,7 @@
     python -m doc_capture_harness run       --config cfg.yaml [options]
     python -m doc_capture_harness resume    --run-dir runs/<run>
     python -m doc_capture_harness ocr       --run-dir runs/<run> [--redo]
+    python -m doc_capture_harness pdf       --run-dir runs/<run> [--next-to-original]
     python -m doc_capture_harness report    --run-dir runs/<run>
     python -m doc_capture_harness calibrate --config cfg.yaml [--test-nav]
     python -m doc_capture_harness list-windows
@@ -99,7 +100,9 @@ def cmd_run(args) -> int:
         raise ConfigError("document.path (or --document) is required")
     run_dir = Path(args.run_dir) if args.run_dir else _default_run_dir(cfg)
     af, sf = windows_factories(cfg)
-    h = Harness(cfg, run_dir, af, sf, skip_ocr=args.no_ocr, force=args.force)
+    if args.pdf_next_to_original:
+        cfg.pdf.copy_next_to_original = True
+    h = Harness(cfg, run_dir, af, sf, skip_ocr=args.no_ocr, skip_pdf=args.no_pdf, force=args.force)
     code = h.run()
     print(f"\nRun directory: {run_dir}\nReport: {run_dir / 'report.md'}\nExit code: {code}")
     return code
@@ -118,7 +121,10 @@ def cmd_resume(args) -> int:
         if args.manual:
             cfg.manual.mode = args.manual
     af, sf = windows_factories(cfg)
-    h = Harness(cfg, run_dir, af, sf, resume=True, force=args.force, skip_ocr=args.no_ocr)
+    if args.pdf_next_to_original:
+        cfg.pdf.copy_next_to_original = True
+    h = Harness(cfg, run_dir, af, sf, resume=True, force=args.force, skip_ocr=args.no_ocr,
+                skip_pdf=args.no_pdf)
     code = h.run()
     print(f"\nReport: {run_dir / 'report.md'}\nExit code: {code}")
     return code
@@ -142,6 +148,24 @@ def cmd_ocr(args) -> int:
         h.cfg.ocr.lang = args.lang
     code = h.ocr_only(redo=args.redo)
     print(f"OCR text: {run_dir / 'ocr'}\nReport: {run_dir / 'report.md'}")
+    return code
+
+
+def cmd_pdf(args) -> int:
+    run_dir = Path(args.run_dir)
+    h = _offline_harness(run_dir)
+    if args.no_text_layer:
+        h.cfg.pdf.text_layer = False
+    if args.page_size:
+        h.cfg.pdf.page_size = args.page_size
+    code = h.pdf_only(explicit_output=Path(args.output) if args.output else None,
+                      next_to_original=True if args.next_to_original else None,
+                      overwrite=True if args.overwrite else None)
+    pdf = h.manifest.data["pdf"]
+    print("\n".join(f"Searchable PDF: {f}" for f in pdf["files"]))
+    print(f"Pages: {pdf['pages']}  text layer: {pdf['text_layer']}  verified: {pdf['verification']['ok']}")
+    for p in pdf["verification"]["problems"]:
+        print(f"  problem: {p}")
     return code
 
 
@@ -311,6 +335,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--run-dir", help="output directory (default: <output.root>/<stem>_<timestamp>)")
     r.add_argument("--no-ocr", action="store_true", help="capture only; run `ocr` later")
     r.add_argument("--force", action="store_true", help="reuse a run directory that already has a manifest")
+    r.add_argument("--no-pdf", action="store_true", help="skip building the searchable PDF")
+    r.add_argument("--pdf-next-to-original", action="store_true",
+                   help="also write <stem>.ocr.pdf next to the original (never over it)")
     r.set_defaults(func=cmd_run)
 
     rs = sub.add_parser("resume", help="continue an interrupted run")
@@ -318,6 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--run-dir", required=True)
     rs.add_argument("--no-ocr", action="store_true")
     rs.add_argument("--force", action="store_true", help="resume even if the document hash changed")
+    rs.add_argument("--no-pdf", action="store_true")
+    rs.add_argument("--pdf-next-to-original", action="store_true")
     rs.set_defaults(func=cmd_resume)
 
     o = sub.add_parser("ocr", help="(re)run OCR on captured pages; works on any OS")
@@ -325,6 +354,16 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--redo", action="store_true", help="re-OCR pages that already have text")
     o.add_argument("--lang", help="override ocr.lang")
     o.set_defaults(func=cmd_ocr)
+
+    pd = sub.add_parser("pdf", help="(re)build the searchable PDF from captured pages; works on any OS")
+    pd.add_argument("--run-dir", required=True)
+    pd.add_argument("--output", help="explicit output path (must not be the original document)")
+    pd.add_argument("--next-to-original", action="store_true",
+                    help="also write <stem>.ocr.pdf in the original document's folder")
+    pd.add_argument("--overwrite", action="store_true", help="replace an existing output file")
+    pd.add_argument("--no-text-layer", action="store_true", help="image-only PDF (no OCR text)")
+    pd.add_argument("--page-size", choices=["original", "letter", "a4", "pixels"])
+    pd.set_defaults(func=cmd_pdf)
 
     rp = sub.add_parser("report", help="rebuild report.json/report.md from the manifest")
     rp.add_argument("--run-dir", required=True)

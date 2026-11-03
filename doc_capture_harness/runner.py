@@ -54,7 +54,8 @@ class PageCapture:
 class Harness:
     def __init__(self, cfg: HarnessConfig, run_dir: Path, adapter_factory: AdapterFactory,
                  source_factory: SourceFactory, *, resume: bool = False, force: bool = False,
-                 responder: Optional[Callable[[str, str], str]] = None, skip_ocr: bool = False):
+                 responder: Optional[Callable[[str, str], str]] = None, skip_ocr: bool = False,
+                 skip_pdf: bool = False):
         self.cfg = cfg
         self.paths = RunPaths(Path(run_dir))
         self.paths.ensure()
@@ -64,6 +65,7 @@ class Harness:
         self.resume = resume
         self.force = force
         self.skip_ocr = skip_ocr
+        self.skip_pdf = skip_pdf
         self.estop = EmergencyStopMonitor(cfg.safety.estop_hotkey, self.paths.root / cfg.safety.stop_file_name)
         self.manifest: Optional[Manifest] = None
         self.checkpoint = ManualCheckpoint(cfg.manual, self.estop, diagnostics=self.save_diagnostics,
@@ -625,6 +627,8 @@ class Harness:
                     self.prompts.handle(None)
             if self.cfg.ocr.enabled and not self.skip_ocr:
                 self.run_ocr()
+            if self.cfg.pdf.enabled and not self.skip_pdf:
+                self.make_pdf()
             self.manifest.data["status"] = "completed"
             code = EXIT_OK
         except (EmergencyStop, KeyboardInterrupt) as exc:
@@ -647,8 +651,9 @@ class Harness:
                     getattr(self.adapter, "inputs", None), "fallback_uses", 0)
                 self.manifest.save()
                 summary = write_report(self.manifest, self.paths)
+                pdf_bad = bool(summary.get("pdf")) and not summary["pdf"]["verification"]["ok"]
                 if code == EXIT_OK and (summary["pages_needing_review"] or summary["end_is_uncertain"]
-                                        or not summary["document_unchanged"]):
+                                        or not summary["document_unchanged"] or pdf_bad):
                     code = EXIT_WARNINGS
                 event(self.log, "run_finished", f"exit code {code}", status=self.manifest.data["status"],
                       report=str(self.paths.report_md))
@@ -667,6 +672,18 @@ class Harness:
                                          "ts": now_iso()}
         self.manifest.add_event("errors", {"type": status, "detail": detail})
         event(self.log, f"run_{status}", detail, level=40)
+
+    def make_pdf(self, **kwargs) -> dict:
+        from .pdf_output import build_pdf
+        return build_pdf(self.cfg, self.manifest, self.paths, estop=self.estop, **kwargs)
+
+    def pdf_only(self, **kwargs) -> int:
+        from .report import write_report
+        self.manifest = Manifest.load(self.paths)
+        res = self.make_pdf(**kwargs)
+        summary = write_report(self.manifest, self.paths)
+        ok = res["verification"]["ok"] and not summary["pages_needing_review"]
+        return EXIT_OK if ok else EXIT_WARNINGS
 
     def ocr_only(self, redo: bool) -> int:
         from .report import write_report

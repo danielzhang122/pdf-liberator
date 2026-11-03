@@ -2,6 +2,8 @@
 
 A Windows test harness that opens a document in a **desktop PDF reader** (Adobe Acrobat / Acrobat Reader, PDF-XChange, or a generic configured reader), captures every rendered page as PNG, runs **Tesseract OCR** locally, and writes a **verification report**.
 
+It also assembles the captures into a **searchable PDF**: each page is the captured image with an invisible OCR text layer, sized like the original's pages. The original file is never modified.
+
 It is meant for documents whose real content only appears after the reader runs a viewer-specific wrapper or document JavaScript, so a PDF library sees only a placeholder page.
 
 > **Scope.** Use it only on documents you own or are authorised to test. The harness captures what the reader shows on screen and nothing more. It does **not** decrypt files, bypass DRM, enable JavaScript globally, or dismiss security prompts. If a reader window asks Windows to exclude it from capture (display affinity), the run stops with `CaptureBlocked`.
@@ -35,6 +37,7 @@ cli.py ──► runner.Harness ────────────────
               │                         crop, stitch, duplicates)        │
               │ navigate / end detect  (navigation.py)                   │
               │ OCR                    (ocr.py → pytesseract)            │
+              │ searchable PDF         (pdf_output.py → Tesseract + pypdf)│
               │ manifest + report      (state.py, report.py)             │
               ▼                                                          ┘
         ViewerAdapter (viewers/)                  CaptureSource
@@ -55,7 +58,20 @@ Per page, the runner does the following:
 5. It crops the frame to the page using the reader's canvas colour, saves `pages/page_NNNN.png`, and updates `manifest.json` atomically.
 6. It advances to the next page, verifies the move, and decides whether the document has ended (see [End-of-document detection](#end-of-document-detection)).
 
-OCR runs after capture, or later with the `ocr` command on any OS.
+OCR runs after capture, then the searchable PDF is built. Both can also be run later with the `ocr` and `pdf` commands, on any OS.
+
+### Searchable PDF ("merging back" into a PDF)
+
+`pdf_output.py` turns `pages/page_NNNN.png` into `output/<stem>.ocr.pdf`:
+
+- **One PDF page per captured page.** Tesseract's PDF renderer produces the page image with an invisible text layer positioned over each word, so the PDF can be searched, and text selected and copied. It uses the same `ocr.lang`/`psm`/`oem` and resolution as the `.txt` files.
+- **Page sizes and metadata come from the original** (`pdf.page_size: original`) when its file can be read *without decryption*: each output page gets the original page's width (height follows the capture), and title/author are copied. Encrypted originals are not decrypted. Pages then use `pdf.fallback_page_size` (letter or a4), and the report says so. Wrapper documents often hold only a placeholder page, so the original's page count may differ; this is noted, not treated as an error.
+- **Missing or failed pages** get a red-bordered placeholder page ("Page N was not captured"), so PDF page numbers match document page numbers. Set `pdf.missing_pages: skip` to omit them.
+- **Never written over the original.** The default output is inside the run directory. `--next-to-original` (or `pdf.copy_next_to_original`) also writes a *new* `<stem>.ocr.pdf` beside the original. Existing files outside the run directory are only replaced with `--overwrite`, and any path equal to the original or its working copy is refused.
+- **Verification.** The written PDF is reopened to check the page count, and that every page where OCR found words has extractable text. Results appear in `report.md` ("Searchable PDF") and affect the exit code.
+- **Provenance.** Metadata records the source document's SHA-256, the run id, and a note that the pages are screen captures and the text is OCR.
+- Without Tesseract, an image-only PDF is produced and the report notes it.
+- The PDF is a derived copy of the rendered content: an image of each page plus OCR text, not the original PDF objects. Fonts, vector graphics, links, form fields and document JavaScript are not preserved. Handle and distribute it under the same terms as the source document.
 
 ---
 
@@ -82,7 +98,7 @@ python -m pip install -r requirements.txt
 The individual packages, if you are not using `requirements.txt`:
 
 ```powershell
-python -m pip install pywinauto pywin32 pyautogui mss Pillow numpy pytesseract PyYAML pytest
+python -m pip install pywinauto pywin32 pyautogui mss Pillow numpy pytesseract PyYAML pypdf pytest
 ```
 
 If `import win32api` fails after installing pywin32, run its post-install step once from an elevated prompt:
@@ -233,6 +249,22 @@ python -m doc_capture_harness run -c my-test.yaml --no-ocr
 python -m doc_capture_harness ocr --run-dir runs\contract-v3 --lang eng+deu
 ```
 
+Also write the searchable PDF next to the original (as a new `<name>.ocr.pdf`):
+
+```powershell
+python -m doc_capture_harness run -c my-test.yaml --pdf-next-to-original
+```
+
+Rebuild the PDF later, for example after `ocr --redo`, or to a chosen path:
+
+```powershell
+python -m doc_capture_harness pdf --run-dir runs\contract-v3 --next-to-original --overwrite
+```
+
+```powershell
+python -m doc_capture_harness pdf --run-dir runs\contract-v3 --output D:\Review\contract-v3.ocr.pdf
+```
+
 Resume an interrupted, aborted or emergency-stopped run. This reuses the run's saved config and refuses if the document hash has changed (`--force` overrides):
 
 ```powershell
@@ -261,6 +293,7 @@ runs/<run>/
   ocr/page_0001.txt …        per-page OCR text, in reading order
   ocr/page_0001.tsv …        word boxes + confidences
   ocr/combined.txt           all pages, "===== Page N =====" separators, missing pages marked
+  output/<stem>.ocr.pdf      searchable PDF (page images + invisible OCR text layer)
   report.md, report.json     verification report
   manifest.json              resumable state (per-page status, hashes, flags, timings, events)
   config.resolved.json       effective configuration
@@ -280,12 +313,13 @@ The report contains:
 - timings per phase and per page
 - the original document's hash before and after the run
 - environment: OS, DPI awareness, monitors and scale factors, reader executable
+- the searchable PDF: files, page count, text layer, placeholder pages, verification
 - a per-page table, and a **"Pages needing review"** list with flags
 
 | Exit code | Meaning |
 |---|---|
 | 0 | Completed; every page clean; end of document certain |
-| 2 | Completed, but some pages need review, or the end was heuristic/limited, or the original changed |
+| 2 | Completed, but some pages need review, the end was heuristic/limited, the original changed, or PDF verification failed |
 | 3 | Stopped by the operator or emergency stop (resumable) |
 | 4 | Error (see `logs/` and `diagnostics/`) |
 
@@ -415,3 +449,4 @@ The tests cover:
 - stability detection, page cropping, overlap stitching and duplicate hashing
 - the prompt policy, including security acknowledgement, unknown dialogs, obstructions and `max_times`
 - end-to-end simulated runs: indicator-driven ends, identical pages, the no-indicator end probe, known-page-count checkpoints, flaky navigation, the `max_pages` limit, dialogs, emergency stop with resume, refusal to resume a changed document, scroll-mode stitching, unattended abort, and real OCR when Tesseract is installed
+- searchable PDF output: text layer extraction, page size and metadata from the original, encrypted originals left encrypted, refusal to overwrite the original, writing next to the original with overwrite protection, placeholder pages, and the image-only fallback

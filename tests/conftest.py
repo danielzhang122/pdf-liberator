@@ -25,6 +25,7 @@ def fast_config(doc: Path, **overrides):
         },
         "prompts": {"startup_timeout_s": 3.0},
         "manual": {"mode": "abort", "beep": False},
+        "pdf": {"enabled": False},          # enabled explicitly in test_pdf.py
         "safety": {"estop_hotkey": None},
         "logging": {"console": False},
     }

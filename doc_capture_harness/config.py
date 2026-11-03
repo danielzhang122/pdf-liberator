@@ -169,6 +169,25 @@ class OcrConfig:
     save_tsv: bool = True
 
 
+# --------------------------------------------------------------------------- pdf
+
+@dataclass
+class PdfConfig:
+    """Searchable PDF assembled from the captures. The original is never modified."""
+    enabled: bool = True
+    text_layer: bool = True              # invisible OCR text over each page image
+    output_name: Optional[str] = None    # default "<stem>.ocr.pdf"
+    copy_next_to_original: bool = False  # also write <original dir>/<output_name>
+    overwrite: bool = False              # replace an existing file outside the run directory
+    page_size: str = "original"          # original | letter | a4 | pixels
+    fallback_page_size: str = "letter"   # when the original's sizes are unreadable/encrypted
+    pixels_dpi: float = 150.0            # page_size: pixels
+    image_format: str = "png"            # png (lossless) | jpeg (smaller)
+    jpeg_quality: int = 85
+    missing_pages: str = "placeholder"   # placeholder | skip
+    copy_metadata: bool = True           # title/author/... from the original, if readable
+
+
 # --------------------------------------------------------------------------- prompts
 
 DEFAULT_SECURITY_RE = [
@@ -252,6 +271,7 @@ class HarnessConfig:
     viewer: ViewerConfig = field(default_factory=ViewerConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     ocr: OcrConfig = field(default_factory=OcrConfig)
+    pdf: PdfConfig = field(default_factory=PdfConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     manual: ManualConfig = field(default_factory=ManualConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -385,4 +405,12 @@ def validate(cfg: HarnessConfig) -> None:
         check(any([r.title_re, r.text_re, r.class_re]), f"{where}: needs at least one of title_re/text_re/class_re")
         check(r.action != "click" or r.button, f"{where}: action 'click' requires 'button'")
         check(r.action != "keys" or r.keys, f"{where}: action 'keys' requires 'keys'")
+    check(cfg.pdf.page_size in ("original", "letter", "a4", "pixels"),
+          "pdf.page_size must be original, letter, a4 or pixels")
+    check(cfg.pdf.fallback_page_size in ("letter", "a4"), "pdf.fallback_page_size must be letter or a4")
+    check(cfg.pdf.image_format in ("png", "jpeg"), "pdf.image_format must be png or jpeg")
+    check(cfg.pdf.missing_pages in ("placeholder", "skip"), "pdf.missing_pages must be placeholder or skip")
+    if cfg.pdf.output_name:
+        check(cfg.pdf.output_name.lower().endswith(".pdf") and "/" not in cfg.pdf.output_name
+              and "\\" not in cfg.pdf.output_name, "pdf.output_name must be a file name ending in .pdf")
     check(cfg.capture.stability.required_stable_frames >= 2, "stability.required_stable_frames must be >= 2")

@@ -80,6 +80,21 @@ ocr:
   min_word_height_px: 10
   save_tsv: true
 
+# Searchable PDF built from the captures (image + invisible OCR text layer).
+# The original document is never modified; writing over it is refused.
+pdf:
+  enabled: true
+  text_layer: true
+  output_name: null              # default <stem>.ocr.pdf, written to <run>/output/
+  copy_next_to_original: false   # also write <original folder>/<stem>.ocr.pdf (new file)
+  overwrite: false               # replace an existing file outside the run directory
+  page_size: original            # original | letter | a4 | pixels (original: read from the file if not encrypted)
+  fallback_page_size: letter
+  image_format: png              # png (lossless) | jpeg (smaller files)
+  jpeg_quality: 85
+  missing_pages: placeholder     # placeholder keeps page numbering aligned | skip
+  copy_metadata: true
+
 prompts:
   unknown_action: manual     # manual | abort  (unknown dialogs are never dismissed)
   obstruction_action: manual

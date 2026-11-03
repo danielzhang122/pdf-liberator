@@ -98,6 +98,7 @@ def build_summary(m: Manifest) -> dict:
             "capture_per_page_max_s": round(max(cap_times), 3) if cap_times else None,
             "navigation_per_page_mean_s": round(statistics.mean(nav_times), 3) if nav_times else None,
         },
+        "pdf": d.get("pdf"),
         "document_unchanged": integ.get("unchanged", True) if integ.get("checked") else True,
         "document_integrity": integ,
         "environment": d.get("environment", {}),
@@ -176,6 +177,26 @@ def render_markdown(s: dict) -> str:
           f"{p['ocr_mean_conf'] if p['ocr_mean_conf'] is not None else ''} | "
           f"{p['ocr_min_conf'] if p['ocr_min_conf'] is not None else ''} | {flags} |")
     a("")
+    pdf = s.get("pdf")
+    if pdf:
+        a("## Searchable PDF\n")
+        for f in pdf["files"]:
+            a(f"- File: `{f}`")
+        a(f"- Pages: {pdf['pages']}; text layer: {'yes' if pdf['text_layer'] else 'no'}; "
+          f"size: {pdf['bytes']:,} bytes; SHA-256 `{pdf['sha256'][:16]}…`")
+        a(f"- Page size: {pdf['page_size_mode']}"
+          + (" (original PDF encrypted: not decrypted, fallback size used)"
+             if (pdf.get("original_pdf") or {}).get("encrypted") else ""))
+        if pdf["placeholder_pages"]:
+            a(f"- **Placeholder pages (not captured):** {', '.join(map(str, pdf['placeholder_pages']))}")
+        if pdf.get("page_count_note"):
+            a(f"- Note: {pdf['page_count_note']}")
+        if pdf.get("note"):
+            a(f"- Note: {pdf['note']}")
+        v = pdf["verification"]
+        a(f"- Verification: {'OK' if v['ok'] else '**FAILED**'} — {v['pages_with_text']} page(s) with "
+          f"extractable text" + ("".join(f"\n  - {p}" for p in v["problems"])))
+        a("")
     if s["errors"]:
         a("## Errors and failures\n")
         for e in s["errors"]:
