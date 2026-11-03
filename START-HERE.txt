@@ -1,0 +1,24 @@
+Document Capture + OCR - quick start
+====================================
+
+1. Right-click the downloaded zip > "Extract All..." (do not run it from inside the zip).
+
+2. In Adobe Acrobat (or PDF-XChange), once:
+   Edit > Preferences > Page Display: Page Layout = Single Page, Zoom = Fit Page.
+
+3. Drag a PDF, several PDFs, or a folder onto Capture.bat.
+   - The first time, it installs what it needs (Python packages and Tesseract OCR,
+     using winget). This takes a few minutes; accept any installer prompts.
+   - Then it opens each document in your reader and captures every page.
+     Leave the computer alone while it runs (no locking, no sleep).
+
+Results appear in an "ocr_output" folder next to your files:
+   <name>.ocr.pdf      searchable PDF
+   <name>.ocr.txt      text
+   batch_summary.md    status of every document
+
+Stop at any time: Ctrl+Shift+F12. Drag the same files onto Capture.bat again to
+continue; finished documents are skipped.
+
+Problems? Double-click Capture.bat once (it runs setup and a check), or see README.md.
+Only use this on documents you own or are authorised to process.

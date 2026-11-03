@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr
+          python -m pip install -q Pillow numpy pytesseract PyYAML pypdf pikepdf pytest
+          python -m pytest -q
+      - name: Build zip
+        id: zip
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "file=$(python tools/make_release.py "$TAG")" >> "$GITHUB_OUTPUT"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.zip.outputs.tag }}" "${{ steps.zip.outputs.file }}" \
+            --target "${{ github.sha }}" --title "Document Capture ${{ steps.zip.outputs.tag }}" \
+            --notes "Download the zip below, extract it, and follow START-HERE.txt (drag PDFs or a folder onto Capture.bat)."
