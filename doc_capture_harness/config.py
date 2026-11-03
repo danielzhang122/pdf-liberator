@@ -77,7 +77,7 @@ class BusyConfig:
 
 @dataclass
 class ViewerConfig:
-    profile: str = "generic"
+    profile: str = "generic"           # the CLI resolves "auto" to the installed reader
     executable: Optional[str] = None
     executable_candidates: list[str] = field(default_factory=list)
     launch_args: list[str] = field(default_factory=list)   # "{document}" is substituted
@@ -147,6 +147,9 @@ class CaptureConfig:
     placeholder_text_re: list[str] = field(default_factory=list)
     placeholder_wait_s: float = 5.0
     end_probe: bool = True
+    # Fit-page sanity check: pause if the view shows more than one page
+    # (continuous layout) or a page cut off at the top/bottom (zoom too high).
+    layout_check: bool = True
     duplicate_hash_distance: int = 3
 
 
@@ -167,6 +170,8 @@ class OcrConfig:
     page_max_low_conf_ratio: float = 0.25
     min_word_height_px: int = 10
     save_tsv: bool = True
+    workers: int = 0                  # parallel Tesseract processes; 0 = CPU count - 1 (max 8)
+    combined_copy_path: Optional[str] = None   # also write combined text here (batch output)
 
 
 # --------------------------------------------------------------------------- pdf
@@ -186,6 +191,9 @@ class PdfConfig:
     jpeg_quality: int = 85
     missing_pages: str = "placeholder"   # placeholder | skip
     copy_metadata: bool = True           # title/author/... from the original, if readable
+    output_path: Optional[str] = None    # explicit output file (batch mode sets this)
+    keep_page_pdfs: bool = False         # keep ocr/pdf/page_NNNN.pdf after merging (faster rebuilds)
+    verify_sample_pages: int = 60        # text-layer check on this many pages (all, if fewer)
 
 
 # --------------------------------------------------------------------------- prompts
@@ -246,8 +254,9 @@ class DocumentConfig:
     path: str = ""
     open_copy: bool = True
     known_page_count: Optional[int] = None
-    max_pages: int = 500
+    max_pages: int = 5000
     start_page: int = 1
+    time_limit_minutes: Optional[float] = None   # abort (resumable) if capture takes longer
 
 
 @dataclass
@@ -360,6 +369,9 @@ def build_config(raw: dict) -> HarnessConfig:
     raw = copy.deepcopy(raw or {})
     viewer_raw = raw.get("viewer") or {}
     profile = viewer_raw.get("profile", "generic")
+    if profile == "auto":
+        from .viewers.profiles import detect_installed_profile
+        profile = detect_installed_profile() or "generic"
     if profile not in PROFILES:
         raise ConfigError(f"viewer.profile: unknown profile {profile!r}; choose from {sorted(PROFILES)}")
     raw["viewer"] = deep_merge(PROFILES[profile], viewer_raw)

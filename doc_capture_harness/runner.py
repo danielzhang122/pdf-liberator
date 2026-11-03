@@ -24,11 +24,12 @@ from .errors import (CaptureBlocked, EmergencyStop, FocusLost, HarnessError, Res
                      UserAbort)
 from .estop import EmergencyStopMonitor
 from .imaging import (changed_fraction, crop_to_page, dhash, hamming, is_all_black, is_uniform,
-                      sha256_image, stitch_vertical)
+                      layout_issues, sha256_image, stitch_vertical)
 from .logging_utils import event, setup_logging
 from .manual import ManualCheckpoint
 from .models import EndReason, Flag, NavStatus, PageIndicator, Rect
 from .navigation import Navigator, ViewState
+from .ocr_pipeline import OcrPipeline
 from .prompts import PromptHandler
 from .stability import wait_for_stable
 from .state import Manifest, RunPaths, atomic_write_json, now_iso, sha256_file
@@ -55,7 +56,7 @@ class Harness:
     def __init__(self, cfg: HarnessConfig, run_dir: Path, adapter_factory: AdapterFactory,
                  source_factory: SourceFactory, *, resume: bool = False, force: bool = False,
                  responder: Optional[Callable[[str, str], str]] = None, skip_ocr: bool = False,
-                 skip_pdf: bool = False):
+                 skip_pdf: bool = False, extra_stop_files: tuple = ()):
         self.cfg = cfg
         self.paths = RunPaths(Path(run_dir))
         self.paths.ensure()
@@ -66,7 +67,8 @@ class Harness:
         self.force = force
         self.skip_ocr = skip_ocr
         self.skip_pdf = skip_pdf
-        self.estop = EmergencyStopMonitor(cfg.safety.estop_hotkey, self.paths.root / cfg.safety.stop_file_name)
+        self.estop = EmergencyStopMonitor(cfg.safety.estop_hotkey, self.paths.root / cfg.safety.stop_file_name,
+                                          extra_stop_files=tuple(extra_stop_files))
         self.manifest: Optional[Manifest] = None
         self.checkpoint = ManualCheckpoint(cfg.manual, self.estop, diagnostics=self.save_diagnostics,
                                            record=lambda r: self._record_event("manual_checkpoints", r),
@@ -76,6 +78,10 @@ class Harness:
         self.prompts: Optional[PromptHandler] = None
         self.navigator: Optional[Navigator] = None
         self._hashes: dict[int, int] = {}
+        self.pipeline: Optional[OcrPipeline] = None
+        self._orig_info = None
+        self.deadline: Optional[float] = None
+        self._first_checkpoint_done = False
         self._placeholder_ocr_ok: Optional[bool] = None
 
     # ================================================================== helpers
@@ -297,6 +303,27 @@ class Harness:
                                           "then choose Retry.")
             return fn()
 
+    def _check_layout(self) -> None:
+        """Before page 1: the view must show exactly one whole page (fit_page mode)."""
+        if not (self.cfg.capture.layout_check and self.cfg.capture.mode == "fit_page"):
+            return
+        while True:
+            res = self._stable()
+            issues = layout_issues(res.frame, self.cfg.capture.crop.canvas_tolerance)
+            if not issues:
+                return
+            event(self.log, "layout_problem", ", ".join(issues), level=30)
+            why = []
+            if Flag.MULTI_PAGE_VIEW in issues:
+                why.append("more than one page is visible (continuous or two-page layout)")
+            if Flag.PAGE_CUT_OFF in issues:
+                why.append("the page is cut off at the top or bottom (zoom is higher than fit-page)")
+            ans = self.checkpoint("layout", "The reader view is not suitable for capture: " + "; ".join(why)
+                                  + ".\nSwitch to Single Page view and fit-page zoom (Acrobat: Ctrl+0), "
+                                  "then choose Retry. Ignore continues anyway (pages will be flagged).")
+            if ans == "continue":
+                return
+
     def _safe_doc_rect(self) -> Optional[Rect]:
         try:
             return self.adapter.document_rect()
@@ -412,6 +439,8 @@ class Harness:
             self.manifest.set_page(page_no, rec)
             return rec
         img = cap.image
+        if self.cfg.capture.layout_check and self.cfg.capture.mode == "fit_page":
+            flags += layout_issues(img, self.cfg.capture.crop.canvas_tolerance)
         if self.cfg.capture.crop.auto_page:
             cc = self.cfg.capture.crop
             cr = crop_to_page(img, cc.canvas_tolerance, cc.padding, cc.min_page_fraction)
@@ -435,8 +464,8 @@ class Harness:
                    size=list(img.size), sha256=sha256_image(img), dhash=f"{h:064x}",
                    flags=list(dict.fromkeys(flags)))
         self.manifest.set_page(page_no, rec)
-        event(self.log, "page_captured", f"page {page_no} captured", page=page_no, attempts=cap.attempts,
-              flags=rec["flags"], size=rec["size"])
+        event(self.log, "page_captured", f"page {page_no} captured", level=10, page=page_no,
+              attempts=cap.attempts, flags=rec["flags"], size=rec["size"])
         return rec
 
     # ================================================================== main loop
@@ -476,8 +505,12 @@ class Harness:
         nav_flags: list[str] = []
         page = start
         nav_s = time.monotonic() - t_nav
+        t_loop, pages_done = time.monotonic(), 0
         while True:
             self.estop.check()
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                raise UserAbort(f"document time limit of {self.cfg.document.time_limit_minutes} min reached "
+                                f"before page {page} (resume to continue)")
             total, total_src = self._known_total(state.indicator)
             self.manifest.data["expected_pages"] = {"count": total, "source": total_src}
             if page > max_pages:
@@ -487,6 +520,16 @@ class Harness:
             cap = self._capture_page(page)
             cap_s = time.monotonic() - t0
             self._save_page(page, cap, nav_flags, {"navigation_s": round(nav_s, 3), "capture_s": round(cap_s, 3)})
+            if self.pipeline is not None:
+                self.pipeline.submit(page)
+                self.pipeline.poll()
+            pages_done += 1
+            rate = (time.monotonic() - t_loop) / pages_done
+            tot = total or None
+            eta = f", ETA {((tot - page) * rate) / 60:.1f} min" if tot and tot > page else ""
+            event(self.log, "progress", f"page {page}/{tot or '?'} captured ({rate:.1f}s/page{eta}; "
+                  f"OCR done {self.pipeline.done if self.pipeline else 0}, queued "
+                  f"{len(self.pipeline.pending) if self.pipeline else 0})", page=page)
             state = ViewState(cap.raw_frame if cap.raw_frame is not None else state.frame,
                               cap.indicator if cap.indicator.readable else state.indicator, True)
             total, total_src = self._known_total(state.indicator)
@@ -532,35 +575,55 @@ class Harness:
             page += 1
 
     # ================================================================== OCR
+    def _orig(self):
+        """Page sizes/metadata of the original PDF (read once, never decrypted)."""
+        if self._orig_info is None:
+            from .pdf_output import OriginalInfo
+            self._orig_info = OriginalInfo(Path(self.manifest.data["document"]["path"]))
+        return self._orig_info
+
+    def _ensure_pipeline(self) -> OcrPipeline:
+        if self.pipeline is None:
+            from .pdf_output import make_width_fn
+            width_fn = make_width_fn(self.cfg, self._orig()) if not self.skip_pdf else None
+            self.pipeline = OcrPipeline(self.cfg, self.paths, self.manifest, width_fn)
+            event(self.log, "ocr_pipeline", f"{self.pipeline.workers} parallel OCR worker(s)")
+        return self.pipeline
+
     def run_ocr(self, redo: bool = False) -> dict:
-        from .ocr import ocr_image, resolve_tesseract
+        from .ocr import resolve_tesseract
 
         cmd = resolve_tesseract(self.cfg.ocr)
-        event(self.log, "ocr_start", f"tesseract: {cmd}", lang=self.cfg.ocr.lang, psm=self.cfg.ocr.psm)
         t0 = time.monotonic()
         m = self.manifest
+        pipe = self._ensure_pipeline()
         for n in m.captured_pages():
-            self.estop.check()
             rec = m.page(n)
-            if rec.get("ocr") and not redo and self.paths.page_txt(n).exists():
+            if n in pipe.pending:
                 continue
-            ts = time.monotonic()
-            img = Image.open(self.paths.root / rec["image"])
-            res = ocr_image(img, self.cfg.ocr)
-            from .state import atomic_write_text
-            atomic_write_text(self.paths.page_txt(n), res.text)
-            if self.cfg.ocr.save_tsv:
-                atomic_write_text(self.paths.page_tsv(n), res.tsv)
-            rec["ocr"] = res.summary() | {"seconds": round(time.monotonic() - ts, 3),
-                                          "text_file": f"ocr/page_{n:04d}.txt"}
-            m.set_page(n, rec)
-            event(self.log, "page_ocr", f"page {n}: {res.words} words, mean conf {res.mean_conf}",
-                  page=n, flags=res.flags)
+            if redo or not rec.get("ocr") or not self.paths.page_txt(n).exists():
+                pipe.submit(n)
+        remaining = len(pipe.pending)
+        event(self.log, "ocr_start", f"OCR: {remaining} page(s) still to process "
+              f"({pipe.done} done during capture), {pipe.workers} worker(s)", tesseract=cmd,
+              lang=self.cfg.ocr.lang, psm=self.cfg.ocr.psm)
+        last_report = [time.monotonic()]
+
+        def progress(done, total):
+            if time.monotonic() - last_report[0] > 10:
+                last_report[0] = time.monotonic()
+                event(self.log, "ocr_progress", f"OCR {done}/{total} remaining pages done")
+
+        pipe.drain(self.estop.check, progress)
         self._write_combined()
         total = round(time.monotonic() - t0, 3)
-        m.data["timings"]["ocr_s"] = total
+        m.data["timings"]["ocr_after_capture_s"] = total
+        m.data["timings"]["ocr_cpu_s"] = round(sum((m.page(n).get("ocr") or {}).get("seconds", 0)
+                                                    for n in m.captured_pages()), 3)
         m.data["ocr_engine"] = {"tesseract_cmd": cmd, "lang": self.cfg.ocr.lang, "psm": self.cfg.ocr.psm,
-                                "oem": self.cfg.ocr.oem}
+                                "oem": self.cfg.ocr.oem, "workers": pipe.workers}
+        if pipe.failed:
+            m.data["ocr_engine"]["failed_pages"] = sorted(pipe.failed)
         try:
             import pytesseract
             m.data["ocr_engine"]["tesseract_version"] = str(pytesseract.get_tesseract_version())
@@ -586,7 +649,10 @@ class Harness:
             txt = self.paths.page_txt(n)
             body = txt.read_text(encoding="utf-8") if txt.exists() else "(no OCR output)\n"
             parts.append(f"===== Page {n} =====\n{body}")
-        atomic_write_text(self.paths.ocr / "combined.txt", "\n".join(parts))
+        text = "\n".join(parts)
+        atomic_write_text(self.paths.ocr / "combined.txt", text)
+        if self.cfg.ocr.combined_copy_path:
+            atomic_write_text(Path(self.cfg.ocr.combined_copy_path), text)
 
     # ================================================================== entry points
     def run(self) -> int:
@@ -599,6 +665,15 @@ class Harness:
             doc = self._prepare_document()
             event(self.log, "run_start", f"run dir {self.paths.root}", document=self.cfg.document.path,
                   viewer=self.cfg.viewer.profile, resume=self.resume)
+            ocr_on = self.cfg.ocr.enabled and not self.skip_ocr
+            if ocr_on:
+                from .ocr import resolve_tesseract
+                try:
+                    resolve_tesseract(self.cfg.ocr)
+                except FileNotFoundError as exc:
+                    raise HarnessError(f"{exc} Run `python -m doc_capture_harness doctor` for setup help.")
+            if self.cfg.document.time_limit_minutes:
+                self.deadline = time.monotonic() + self.cfg.document.time_limit_minutes * 60
             if self.manifest.data.get("status_capture") == "complete" and self.resume:
                 event(self.log, "capture_already_complete", "capture finished earlier; running OCR/report only")
             else:
@@ -609,11 +684,14 @@ class Harness:
                     self.checkpoint("setup", self.cfg.viewer.setup_checkpoint)
                 self._with_focus(self.adapter.prepare_view)
                 self._wait_until_loaded()
+                self._check_layout()
                 env = self.adapter.environment_info()
                 env["dpi_awareness_requested"] = os.environ.get("DOC_CAPTURE_DPI_MODE", "")
                 self.manifest.data["environment"] = env
                 self.manifest.data["timings"]["open_s"] = round(time.monotonic() - t_open, 3)
                 self.manifest.save()
+                if ocr_on:
+                    self._ensure_pipeline()
                 t_cap = time.monotonic()
                 self._capture_loop()
                 self.manifest.data["timings"]["capture_s"] = round(
@@ -623,7 +701,7 @@ class Harness:
                 if self.cfg.viewer.close_on_finish:
                     self.adapter.close()
                     self.prompts.handle(None)
-            if self.cfg.ocr.enabled and not self.skip_ocr:
+            if ocr_on:
                 self.run_ocr()
             if self.cfg.pdf.enabled and not self.skip_pdf:
                 self.make_pdf()
@@ -642,12 +720,14 @@ class Harness:
             code = EXIT_FAILED
         finally:
             self.estop.stop()
+            if self.pipeline is not None:
+                self.pipeline.close(cancel=True)
             if self.manifest is not None:
                 self.manifest.data["timings"]["last_session_s"] = round(time.monotonic() - t0, 3)
                 self.manifest.data["document_integrity"] = self._verify_original()
                 self.manifest.data["input_fallback_uses"] = getattr(
                     getattr(self.adapter, "inputs", None), "fallback_uses", 0)
-                self.manifest.save()
+                self.manifest.finalize()
                 summary = write_report(self.manifest, self.paths)
                 pdf_bad = bool(summary.get("pdf")) and not summary["pdf"]["verification"]["ok"]
                 if code == EXIT_OK and (summary["pages_needing_review"] or summary["end_is_uncertain"]
@@ -673,12 +753,14 @@ class Harness:
 
     def make_pdf(self, **kwargs) -> dict:
         from .pdf_output import build_pdf
+        kwargs.setdefault("orig", self._orig())
         return build_pdf(self.cfg, self.manifest, self.paths, estop=self.estop, **kwargs)
 
     def pdf_only(self, **kwargs) -> int:
         from .report import write_report
         self.manifest = Manifest.load(self.paths)
         res = self.make_pdf(**kwargs)
+        self.manifest.finalize()
         summary = write_report(self.manifest, self.paths)
         ok = res["verification"]["ok"] and not summary["pages_needing_review"]
         return EXIT_OK if ok else EXIT_WARNINGS
@@ -686,6 +768,11 @@ class Harness:
     def ocr_only(self, redo: bool) -> int:
         from .report import write_report
         self.manifest = Manifest.load(self.paths)
-        self.run_ocr(redo=redo)
+        try:
+            self.run_ocr(redo=redo)
+        finally:
+            if self.pipeline is not None:
+                self.pipeline.close(cancel=True)
+        self.manifest.finalize()
         summary = write_report(self.manifest, self.paths)
         return EXIT_WARNINGS if summary["pages_needing_review"] else EXIT_OK

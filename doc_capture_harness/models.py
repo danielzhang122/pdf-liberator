@@ -144,6 +144,8 @@ class Flag:
     CROP_FALLBACK = "page_crop_fallback_to_viewport"
     MANUAL_OVERRIDE = "manual_override_used"
     CAPTURE_FAILED = "capture_failed"
+    MULTI_PAGE_VIEW = "more_than_one_page_in_view"       # continuous / two-up layout
+    PAGE_CUT_OFF = "page_extends_beyond_view"           # zoom too high in fit_page mode
 
 
 # Flags that mean "a human should look at this page".
@@ -151,5 +153,5 @@ INCOMPLETE_FLAGS = {
     Flag.UNSTABLE, Flag.ALL_BLACK, Flag.PLACEHOLDER, Flag.STITCH_UNCERTAIN,
     Flag.SLICES_TRUNCATED, Flag.INDICATOR_MISMATCH, Flag.OBSTRUCTED,
     Flag.LOW_CONFIDENCE, Flag.LOW_RESOLUTION, Flag.CROP_FALLBACK, Flag.CAPTURE_FAILED,
-    Flag.MANUAL_OVERRIDE, Flag.NAV_RETRY_UNVERIFIED,
+    Flag.MANUAL_OVERRIDE, Flag.NAV_RETRY_UNVERIFIED, Flag.MULTI_PAGE_VIEW, Flag.PAGE_CUT_OFF,
 }

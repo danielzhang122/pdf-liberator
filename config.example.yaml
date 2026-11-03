@@ -1,6 +1,9 @@
 # Example configuration for doc_capture_harness.
 # Only use with documents you own or are authorised to test.
 #
+# A config file is OPTIONAL: `batch` and `run` work with built-in defaults.
+# Use one to change languages, page limits, prompt rules, output options, ...
+#
 # Anything omitted falls back to the viewer profile, then to built-in defaults.
 # Unknown keys are rejected, so typos fail fast. Paths: use forward slashes or
 # single-quoted Windows paths.
@@ -9,11 +12,12 @@ document:
   path: 'C:/TestDocs/sample-wrapped.pdf'
   open_copy: true            # open a read-only copy in <run>/work; set false if the wrapper/licence is bound to the original path
   known_page_count: null     # set when known: makes end-of-document detection exact
-  max_pages: 300             # hard safety cap
+  max_pages: 5000            # hard safety cap per document
   start_page: 1
+  time_limit_minutes: null   # e.g. 240: stop a stuck document (resumable) so a batch can move on
 
 viewer:
-  profile: acrobat           # acrobat | pdfxchange | generic
+  profile: auto              # auto (installed reader) | acrobat | pdfxchange | generic
   executable: null           # null = try the profile's executable_candidates
   attach_only: false         # true = do not launch; attach to an already-open window
   launch_timeout_s: 90
@@ -67,6 +71,7 @@ capture:
     - '(?i)open (this|the) document in'
   placeholder_wait_s: 5
   end_probe: true
+  layout_check: true         # pause/stop if >1 page is visible or the page is cut off (fit_page mode)
 
 ocr:
   enabled: true
@@ -79,6 +84,7 @@ ocr:
   page_max_low_conf_ratio: 0.25
   min_word_height_px: 10
   save_tsv: true
+  workers: 0                 # parallel OCR processes; 0 = CPU count - 1 (max 8). OCR runs during capture.
 
 # Searchable PDF built from the captures (image + invisible OCR text layer).
 # The original document is never modified; writing over it is refused.
@@ -94,6 +100,8 @@ pdf:
   jpeg_quality: 85
   missing_pages: placeholder     # placeholder keeps page numbering aligned | skip
   copy_metadata: true
+  keep_page_pdfs: false          # keep per-page PDFs after merging (faster rebuilds, more disk)
+  verify_sample_pages: 60        # text-layer check on this many pages (all pages if fewer)
 
 prompts:
   unknown_action: manual     # manual | abort  (unknown dialogs are never dismissed)

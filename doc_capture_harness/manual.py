@@ -62,6 +62,9 @@ class ManualCheckpoint:
             self.record({"reason": reason, "message": message, "answer": answer, "diagnostics": diag})
         event(self.log, "manual_checkpoint_answer", answer, reason=reason)
         if answer == "abort":
+            if self.responder is None and self.cfg.mode == "abort":
+                first = (message or "").strip().splitlines()[0] if message else ""
+                raise UserAbort(f"needs attention ({reason}): {first}"[:300])
             raise UserAbort(f"operator aborted at checkpoint '{reason}'")
         self.estop.check()
         return answer

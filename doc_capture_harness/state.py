@@ -3,11 +3,13 @@
 Layout of a run directory::
 
     <run>/
-      manifest.json          # authoritative state, rewritten atomically after each page
+      manifest.json          # run state (header); page records live in records/
+      records/page_0001.json # one atomic record per page (authoritative for resume)
       config.resolved.json   # the effective configuration
       pages/page_0001.png    # cropped captures
       slices/                # raw scroll slices (optional)
       ocr/page_0001.txt      # per-page OCR text (+ .tsv word data)
+      ocr/pdf/page_0001.pdf  # per-page searchable PDF from the same Tesseract pass
       ocr/combined.txt
       diagnostics/           # screenshots + JSON captured on failures
       logs/harness.jsonl
@@ -22,6 +24,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -82,6 +85,13 @@ class RunPaths:
     @property
     def work(self) -> Path: return self.root / "work"
     @property
+    def records(self) -> Path: return self.root / "records"
+    @property
+    def page_pdfs(self) -> Path: return self.root / "ocr" / "pdf"
+
+    def record(self, n: int) -> Path: return self.records / f"page_{n:04d}.json"
+    def page_pdf(self, n: int) -> Path: return self.page_pdfs / f"page_{n:04d}.pdf"
+    @property
     def report_json(self) -> Path: return self.root / "report.json"
     @property
     def report_md(self) -> Path: return self.root / "report.md"
@@ -91,16 +101,27 @@ class RunPaths:
     def page_tsv(self, n: int) -> Path: return self.ocr / f"page_{n:04d}.tsv"
 
     def ensure(self) -> None:
-        for d in (self.root, self.pages, self.ocr, self.diagnostics, self.logs):
+        for d in (self.root, self.pages, self.ocr, self.diagnostics, self.logs, self.records):
             d.mkdir(parents=True, exist_ok=True)
 
 
 class Manifest:
-    """Thin wrapper around the manifest dict with atomic persistence."""
+    """Run state with atomic, scale-friendly persistence.
+
+    Page records live in ``records/page_NNNN.json`` (one small atomic write per
+    page, so cost does not grow with document length). ``manifest.json`` holds
+    everything else and is rewritten at most every ``header_interval_s``
+    seconds, plus on :meth:`save` / :meth:`finalize`. On load, page records
+    from ``records/`` are authoritative, so a crash loses at most a few seconds
+    of header bookkeeping and never a captured page.
+    """
+
+    header_interval_s = 5.0
 
     def __init__(self, paths: RunPaths, data: dict):
         self.paths = paths
         self.data = data
+        self._last_header = 0.0
 
     # ------------------------------------------------------------------ create/load
     @classmethod
@@ -131,19 +152,43 @@ class Manifest:
         data = json.loads(paths.manifest.read_text(encoding="utf-8"))
         if data.get("version") != MANIFEST_VERSION:
             raise ValueError(f"unsupported manifest version {data.get('version')}")
+        pages = dict(data.get("pages") or {})
+        if paths.records.is_dir():
+            for f in paths.records.glob("page_*.json"):
+                try:
+                    rec = json.loads(f.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue          # a torn write cannot happen (atomic), but be safe
+                pages[str(int(rec["page"]))] = rec
+        data["pages"] = pages
         return cls(paths, data)
 
-    def save(self) -> None:
+    def save(self, include_pages: bool = False) -> None:
+        """Write the header now. ``include_pages`` also embeds all page records
+        (done once at the end so manifest.json is self-contained)."""
         self.data["updated"] = now_iso()
-        atomic_write_json(self.paths.manifest, self.data)
+        header = {k: v for k, v in self.data.items() if k != "pages"}
+        header["pages"] = self.data["pages"] if include_pages else {}
+        header["page_records"] = "records/"
+        atomic_write_json(self.paths.manifest, header)
+        self._last_header = time.monotonic()
+
+    def save_soon(self) -> None:
+        if time.monotonic() - self._last_header >= self.header_interval_s:
+            self.save()
+
+    def finalize(self) -> None:
+        self.save(include_pages=True)
 
     # ------------------------------------------------------------------ pages
     def page(self, n: int) -> Optional[dict]:
         return self.data["pages"].get(str(n))
 
     def set_page(self, n: int, record: dict) -> None:
+        record["page"] = n
         self.data["pages"][str(n)] = record
-        self.save()
+        atomic_write_json(self.paths.record(n), record)
+        self.save_soon()
 
     def page_numbers(self) -> list[int]:
         return sorted(int(k) for k in self.data["pages"])
@@ -161,4 +206,4 @@ class Manifest:
 
     def add_event(self, kind: str, payload: dict) -> None:
         self.data["events"].setdefault(kind, []).append({"ts": now_iso(), **payload})
-        self.save()
+        self.save_soon()

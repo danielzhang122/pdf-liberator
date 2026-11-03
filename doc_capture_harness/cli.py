@@ -1,6 +1,8 @@
 """Command-line interface.
 
-    python -m doc_capture_harness run       --config cfg.yaml [options]
+    python -m doc_capture_harness doctor
+    python -m doc_capture_harness batch     C:\\Docs [--out D:\\Out] [--interactive]
+    python -m doc_capture_harness run       C:\\Docs\\file.pdf   (or --config cfg.yaml)
     python -m doc_capture_harness resume    --run-dir runs/<run>
     python -m doc_capture_harness ocr       --run-dir runs/<run> [--redo]
     python -m doc_capture_harness pdf       --run-dir runs/<run> [--next-to-original]
@@ -19,7 +21,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import HarnessConfig, _build, build_config, load_raw, validate
+from .config import HarnessConfig, _build, build_config, deep_merge, load_raw, validate
 from .errors import ConfigError, HarnessError, PlatformUnsupported
 
 
@@ -55,8 +57,12 @@ def windows_factories(cfg: HarnessConfig):
 
 def _apply_overrides(raw: dict, args) -> dict:
     doc = raw.setdefault("document", {})
+    if getattr(args, "doc", None):
+        doc["path"] = args.doc
     if getattr(args, "document", None):
         doc["path"] = args.document
+    if getattr(args, "time_limit", None):
+        doc["time_limit_minutes"] = args.time_limit
     if getattr(args, "known_pages", None) is not None:
         doc["known_page_count"] = args.known_pages
     if getattr(args, "max_pages", None) is not None:
@@ -71,6 +77,23 @@ def _apply_overrides(raw: dict, args) -> dict:
         raw.setdefault("capture", {})["mode"] = args.mode
     if getattr(args, "lang", None):
         raw.setdefault("ocr", {})["lang"] = args.lang
+    if getattr(args, "workers", None):
+        raw.setdefault("ocr", {})["workers"] = args.workers
+    return raw
+
+
+def _resolve_viewer(raw: dict) -> dict:
+    """``viewer.profile: auto`` (the default) -> the reader installed on this machine."""
+    v = raw.setdefault("viewer", {})
+    if v.get("profile", "auto") != "auto":
+        return raw
+    from .viewers.profiles import detect_installed_profile
+    found = detect_installed_profile()
+    if not found:
+        raise ConfigError("No supported reader found (Adobe Acrobat / Acrobat Reader / PDF-XChange). Install one, "
+                          "or use --viewer generic with viewer.executable set in a config file.")
+    v["profile"] = found
+    print(f"Reader: {found} (auto-detected)")
     return raw
 
 
@@ -94,10 +117,10 @@ def cmd_run(args) -> int:
     _enable_dpi()
     from .runner import Harness
 
-    raw = _apply_overrides(load_raw(Path(args.config)) if args.config else {}, args)
+    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
     cfg = build_config(raw)
     if not cfg.document.path:
-        raise ConfigError("document.path (or --document) is required")
+        raise ConfigError("give the document: `run C:\\path\\file.pdf` (or document.path in a config file)")
     run_dir = Path(args.run_dir) if args.run_dir else _default_run_dir(cfg)
     af, sf = windows_factories(cfg)
     if args.pdf_next_to_original:
@@ -115,7 +138,7 @@ def cmd_resume(args) -> int:
 
     run_dir = Path(args.run_dir)
     if args.config:
-        cfg = build_config(_apply_overrides(load_raw(Path(args.config)), args))
+        cfg = build_config(_resolve_viewer(_apply_overrides(load_raw(Path(args.config)), args)))
     else:
         cfg = _resolved_config(run_dir)
         if args.manual:
@@ -216,7 +239,7 @@ def cmd_calibrate(args) -> int:
     from .manual import ManualCheckpoint
     from .stability import wait_for_stable
 
-    raw = _apply_overrides(load_raw(Path(args.config)) if args.config else {}, args)
+    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
     cfg = build_config(raw)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -301,11 +324,52 @@ def cmd_calibrate(args) -> int:
     return 0
 
 
+def cmd_batch(args) -> int:
+    from .batch import Batch, default_output_dir, discover, echo_safe
+
+    out = Path(args.out) if args.out else default_output_dir(args.inputs)
+    items = discover(args.inputs, recursive=not args.no_recursive, exclude=out)
+    if not items:
+        print("No PDF files found.")
+        return 0
+    if args.dry_run:
+        for it in items:
+            print(f"{it.path}  ->  {out / it.rel_out}.ocr.pdf"
+                  + (f"  (known pages {it.known_pages})" if it.known_pages else ""))
+        print(f"\n{len(items)} document(s). Output folder: {out}")
+        return 0
+    _require_windows()
+    _enable_dpi()
+    raw = _resolve_viewer(_apply_overrides(load_raw(Path(args.config)) if args.config else {}, args))
+    raw.setdefault("document", {}).pop("path", None)
+    build_config(deep_merge(raw, {"document": {"path": str(items[0].path)}}))   # validate once up front
+    if args.no_pdf:
+        raw.setdefault("pdf", {})["enabled"] = False
+    def setup_prompt(text: str) -> None:
+        print(f"\nBefore the batch starts:\n  {text}\n")
+        print("The batch then runs unattended. Emergency stop: Ctrl+Shift+F12, or create a file named STOP in "
+              f"{out / '_runs'}.")
+        try:
+            input("Press Enter to start (Ctrl+C to cancel)... ")
+        except EOFError:
+            pass
+
+    batch = Batch(raw, items, out, windows_factories, interactive=args.interactive, echo=echo_safe,
+                  setup_prompt=None if args.no_prompt else setup_prompt)
+    return batch.run()
+
+
+def cmd_doctor(args) -> int:
+    from .doctor import run_doctor
+    raw = load_raw(Path(args.config)) if args.config else {}
+    return run_doctor(raw, Path(args.out_dir) if args.out_dir else Path.cwd())
+
+
 def cmd_init_config(args) -> int:
     example = Path(__file__).resolve().parent.parent / "config.example.yaml"
     text = example.read_text(encoding="utf-8") if example.exists() else ""
     if args.viewer:
-        text = text.replace("profile: acrobat", f"profile: {args.viewer}", 1)
+        text = text.replace("profile: auto", f"profile: {args.viewer}", 1)
     sys.stdout.write(text)
     return 0
 
@@ -322,15 +386,20 @@ def build_parser() -> argparse.ArgumentParser:
         if with_config:
             sp.add_argument("--config", "-c", help="YAML/JSON configuration file")
         sp.add_argument("--document", "-d", help="override document.path")
-        sp.add_argument("--viewer", choices=["acrobat", "pdfxchange", "generic"], help="override viewer.profile")
+        sp.add_argument("--viewer", choices=["auto", "acrobat", "pdfxchange", "generic"],
+                        help="reader to use (default: auto-detect)")
         sp.add_argument("--known-pages", type=int, help="override document.known_page_count")
         sp.add_argument("--max-pages", type=int, help="override document.max_pages")
         sp.add_argument("--attach", action="store_true", help="attach to an already-open reader window")
         sp.add_argument("--manual", choices=["messagebox", "console", "abort"], help="manual checkpoint mode")
         sp.add_argument("--mode", choices=["fit_page", "scroll"], help="override capture.mode")
         sp.add_argument("--lang", help="override ocr.lang (e.g. eng+deu)")
+        sp.add_argument("--workers", type=int, help="parallel OCR processes (default: CPU count - 1)")
+        sp.add_argument("--time-limit", type=float, metavar="MIN",
+                        help="stop a document after MIN minutes of capture (resumable)")
 
-    r = sub.add_parser("run", help="capture + OCR + report")
+    r = sub.add_parser("run", help="one document: capture + OCR + searchable PDF + report")
+    r.add_argument("doc", nargs="?", help="the document (instead of --document / config)")
     common(r)
     r.add_argument("--run-dir", help="output directory (default: <output.root>/<stem>_<timestamp>)")
     r.add_argument("--no-ocr", action="store_true", help="capture only; run `ocr` later")
@@ -376,6 +445,29 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--depth", type=int, default=6, help="UIA tree depth to dump")
     c.add_argument("--test-nav", action="store_true", help="press next then prev and report what changed")
     c.set_defaults(func=cmd_calibrate)
+
+    b = sub.add_parser("batch", help="many documents: a folder, a .csv/.txt list, or several files")
+    b.add_argument("inputs", nargs="+", help="folder(s), PDF file(s), or a .csv (path,known_pages,lang) / .txt list")
+    b.add_argument("--out", help="output folder (default: <input folder>\\ocr_output)")
+    b.add_argument("--config", "-c", help="optional YAML/JSON configuration applied to every document")
+    b.add_argument("--viewer", choices=["auto", "acrobat", "pdfxchange", "generic"], help="default: auto-detect")
+    b.add_argument("--interactive", action="store_true",
+                   help="pause for the operator on problems (default: skip the document and continue)")
+    b.add_argument("--lang", help="OCR language(s), e.g. eng+deu")
+    b.add_argument("--workers", type=int, help="parallel OCR processes")
+    b.add_argument("--time-limit", type=float, metavar="MIN", help="per-document capture time limit")
+    b.add_argument("--max-pages", type=int, help="per-document page cap")
+    b.add_argument("--no-pdf", action="store_true", help="text only, no searchable PDF")
+    b.add_argument("--no-recursive", action="store_true", help="do not look in sub-folders")
+    b.add_argument("--dry-run", action="store_true", help="list what would be processed, then exit")
+    b.add_argument("--no-prompt", action="store_true",
+                   help="do not wait for Enter before starting (scheduled/remote runs)")
+    b.set_defaults(func=cmd_batch)
+
+    dr = sub.add_parser("doctor", help="check that this machine is ready (Python packages, Tesseract, reader, display)")
+    dr.add_argument("--config", "-c")
+    dr.add_argument("--out-dir", help="where output will be written (checks free space)")
+    dr.set_defaults(func=cmd_doctor)
 
     lw = sub.add_parser("list-windows", help="list top-level windows and monitors")
     lw.add_argument("--all", action="store_true", help="include untitled windows")

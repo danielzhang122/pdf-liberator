@@ -62,6 +62,7 @@ class Scenario:
     # page number -> how many next_page presses are ignored there
     stuck_next: dict[int, int] = field(default_factory=dict)
     fit: str = "page"                       # page | width (scroll mode)
+    layout: str = "single"                  # single | continuous (two pages visible) | zoomed (page cut off)
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -205,6 +206,16 @@ class FakeViewer(ViewerAdapter):
             page = Image.new("RGB", page.size, "white")
             page.paste(part, (0, 0))
         x = (vw - page.width) // 2
+        if self.s.layout == "continuous":
+            small = page.resize((page.width * 2 // 3, page.height * 2 // 3))
+            x = (vw - small.width) // 2
+            img.paste(small, (x, 10))
+            img.paste(small, (x, 10 + small.height + 20))      # next page peeking in below
+            return img
+        if self.s.layout == "zoomed":
+            big = page.resize((int(page.width * 1.3), int(page.height * 1.3)))
+            img.paste(big, ((vw - big.width) // 2, 0))
+            return img
         if self.s.fit == "width":
             img.paste(page.crop((0, self.scroll, page.width, min(page.height, self.scroll + vh))), (x, 0))
         else:

@@ -217,9 +217,12 @@ def test_estop_file(tmp_path):
 
 def test_example_config_is_valid():
     from pathlib import Path
-    from doc_capture_harness.config import load_config
+    from doc_capture_harness.config import load_config, load_raw
     cfg = load_config(Path(__file__).resolve().parent.parent / "config.example.yaml")
-    assert cfg.viewer.profile == "acrobat"
+    assert cfg.viewer.profile in ("acrobat", "pdfxchange", "generic")   # "auto" resolved
     names = [r.name for r in cfg.prompts.rules]
     assert names[0] == "untagged-document-notice"          # user rules first
+    raw = load_raw(Path(__file__).resolve().parent.parent / "config.example.yaml")
+    raw["viewer"]["profile"] = "acrobat"
+    names = [r.name for r in build_config(raw).prompts.rules]
     assert "javascript-prompt-requires-operator" in names  # profile rules appended

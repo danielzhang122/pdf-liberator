@@ -195,3 +195,58 @@ def stitch_vertical(slices: list[Image.Image], template_rows: int = 48, max_mean
         out.paste(new.convert("RGB"), (0, keep))
         canvas, prev = out, new
     return canvas, matches
+
+
+# --------------------------------------------------------------------------- layout check
+
+def page_bands(img: Image.Image, tolerance: int = 14, min_gap: int = 6,
+               min_band_fraction: float = 0.05) -> Optional[list[tuple[int, int]]]:
+    """Vertical extents of page content separated by canvas rows.
+
+    Returns None when the canvas cannot be identified (near-white border).
+    """
+    canvas = estimate_canvas_color(img)
+    if min(canvas) >= 235:
+        return None
+    rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
+    h = rgb.shape[0]
+    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tolerance
+    rows = diff.mean(axis=1) > 0.15
+    bands: list[list[int]] = []
+    start = None
+    for y, on in enumerate(rows):
+        if on and start is None:
+            start = y
+        elif not on and start is not None:
+            bands.append([start, y])
+            start = None
+    if start is not None:
+        bands.append([start, h])
+    merged: list[list[int]] = []
+    for b in bands:
+        if merged and b[0] - merged[-1][1] < min_gap:
+            merged[-1][1] = b[1]
+        else:
+            merged.append(b)
+    return [(a, b) for a, b in merged if (b - a) >= min_band_fraction * h]
+
+
+def layout_issues(img: Image.Image, tolerance: int = 14) -> list[str]:
+    """Fit-page sanity checks on a raw viewport capture (see Flag.MULTI_PAGE_VIEW / PAGE_CUT_OFF)."""
+    from .models import Flag
+
+    bands = page_bands(img, tolerance)
+    if bands is None:
+        # No canvas visible on any edge: the page covers the whole viewport, so
+        # parts of it are almost certainly off-screen (readers' canvases are grey
+        # by default; set capture.layout_check: false for a white-canvas reader).
+        return [Flag.PAGE_CUT_OFF]
+    if not bands:
+        return []
+    issues = []
+    if len(bands) > 1:
+        issues.append(Flag.MULTI_PAGE_VIEW)
+    h = img.height
+    if bands[0][0] <= 0 or bands[-1][1] >= h:
+        issues.append(Flag.PAGE_CUT_OFF)
+    return issues

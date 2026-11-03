@@ -8,6 +8,7 @@ numpy>=1.24
 pytesseract>=0.3.10
 PyYAML>=6.0
 pypdf>=4.0
+pikepdf>=8.0
 
 # Tests
 pytest>=8.0

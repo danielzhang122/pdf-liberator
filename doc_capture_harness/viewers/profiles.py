@@ -56,9 +56,10 @@ PROFILES: dict[str, dict] = {
         "goto_dialog_title_re": r"(?i)go to page",
         # Page layout has no default shortcut, so it is a manual step.
         "setup_checkpoint": (
-            "In Acrobat select View > Page Display > Single Page View, close any "
-            "side panels/banners that cover the page, and make sure page 1 is shown. "
-            "Then continue."
+            "One-time Acrobat setting (remembered for every document): Edit > Preferences > "
+            "Page Display > Page Layout = Single Page, Zoom = Fit Page. Close side panels "
+            "that cover the page (they stay closed). Make sure no other Acrobat window "
+            "covers the screen."
         ),
         "_prompt_rules": [_JS_MANUAL, _SAVE_CHANGES_NO],
     },
@@ -82,9 +83,21 @@ PROFILES: dict[str, dict] = {
         "prepare_keys": [],
         "goto_method": "sequential",
         "setup_checkpoint": (
-            "In PDF-XChange select View > Page Display > Single Page, close side panels "
-            "that cover the page, and make sure page 1 is shown. Then continue."
+            "One-time PDF-XChange setting (remembered for every document): Edit > "
+            "Preferences > Page Display > Default Page Layout = Single Page and Default "
+            "Zoom = Fit Page. Close side panes that cover the page."
         ),
         "_prompt_rules": [_JS_MANUAL, _SAVE_CHANGES_NO],
     },
 }
+
+
+def detect_installed_profile() -> str | None:
+    """First profile whose reader executable exists on this machine (Windows)."""
+    import os
+
+    for name in ("acrobat", "pdfxchange"):
+        for exe in PROFILES[name].get("executable_candidates", []):
+            if os.path.exists(os.path.expandvars(exe)):
+                return name
+    return None

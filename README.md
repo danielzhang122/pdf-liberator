@@ -10,23 +10,114 @@ It is meant for documents whose real content only appears after the reader runs 
 
 ---
 
-## Contents
+## Quick start
 
-1. [How it works](#how-it-works)
-2. [Installation](#installation)
-3. [Tesseract setup](#tesseract-setup)
-4. [Preparing the reader and desktop](#preparing-the-reader-and-desktop)
-5. [Configuration](#configuration)
-6. [CLI usage](#cli-usage)
-7. [Outputs and exit codes](#outputs-and-exit-codes)
-8. [End-of-document detection](#end-of-document-detection)
-9. [Reliability mechanisms](#reliability-mechanisms)
-10. [Manual checkpoints](#manual-checkpoints)
-11. [Supporting another reader](#supporting-another-reader)
-12. [Assumptions and limitations](#assumptions-and-limitations)
-13. [Testing](#testing)
+**1. Set up (once per machine).** Right-click `install.ps1` and choose **Run with PowerShell**. It installs Python packages and Tesseract (through winget if missing), then runs `doctor` to check the machine. Fix anything marked `FAIL`.
+
+**2. Set the reader's defaults (once).** In Acrobat: *Edit > Preferences > Page Display*, set **Page Layout = Single Page** and **Zoom = Fit Page**. (PDF-XChange: *Edit > Preferences > Page Display*, Default Page Layout = Single Page, Default Zoom = Fit Page.) Close side panels. Acrobat and PDF-XChange remember these settings for every document.
+
+**3. Capture.** Drag a PDF, several PDFs, or a whole folder onto **`Capture.bat`**. For each document you get:
+
+```
+<input folder>\ocr_output\<name>.ocr.pdf     searchable PDF (page images + OCR text layer)
+<input folder>\ocr_output\<name>.ocr.txt     OCR text, "===== Page N =====" per page
+<input folder>\ocr_output\batch_summary.md   one line per document: status, pages, pages to review
+```
+
+The batch runs **unattended**:
+
+- Anything that needs a person, such as an unknown dialog, a wrong page layout, or failed navigation, sets that document aside as `needs_attention` and the batch moves on.
+- Drag the same folder onto `Capture.bat` again to retry. Finished documents are skipped, interrupted ones resume where they stopped, and the set-aside ones are retried.
+- Stop at any time with **Ctrl+Shift+F12**.
+
+The same from a terminal:
+
+```powershell
+.venv\Scripts\python.exe -m doc_capture_harness batch C:\Docs
+```
+
+No config file is needed: the installed reader is detected automatically. See [Batch processing](#batch-processing) and [Large documents](#large-documents) for options.
 
 ---
+
+## Contents
+
+1. [Batch processing](#batch-processing)
+2. [Large documents](#large-documents)
+3. [How it works](#how-it-works)
+4. [Installation](#installation)
+5. [Tesseract setup](#tesseract-setup)
+6. [Preparing the reader and desktop](#preparing-the-reader-and-desktop)
+7. [Configuration](#configuration)
+8. [CLI usage](#cli-usage)
+9. [Outputs and exit codes](#outputs-and-exit-codes)
+10. [End-of-document detection](#end-of-document-detection)
+11. [Reliability mechanisms](#reliability-mechanisms)
+12. [Manual checkpoints](#manual-checkpoints)
+13. [Supporting another reader](#supporting-another-reader)
+14. [Assumptions and limitations](#assumptions-and-limitations)
+15. [Testing](#testing)
+
+---
+
+## Batch processing
+
+```powershell
+python -m doc_capture_harness batch C:\Docs                 # every PDF under C:\Docs (sub-folders too)
+```
+
+```powershell
+python -m doc_capture_harness batch C:\Docs --out D:\OCR    # choose the output folder
+```
+
+```powershell
+python -m doc_capture_harness batch list.csv --out D:\OCR    # an explicit list
+```
+
+```powershell
+python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be processed
+```
+
+- **Inputs:** folders (recursive by default; `--no-recursive` turns that off), individual files, a `.txt` list (one path per line), or a `.csv` with a `path` column and optional `known_pages` and `lang` columns. A known page count per document makes end-of-document detection exact. Existing `*.ocr.pdf` outputs are never picked up as inputs.
+- **Outputs** mirror the input folder structure under the output folder (default `<input>\ocr_output`). Name clashes get a short unique suffix. Full run folders (pages, report, logs, diagnostics) are kept in `<out>\_runs\`. The summary is in `batch_summary.csv` / `batch_summary.md`.
+- **Statuses:**
+  - `completed`: clean.
+  - `completed_with_warnings`: some pages are flagged for review, or the end of the document was heuristic. The per-document `report.md` says which.
+  - `needs_attention`: stopped for something a person must resolve; the reason is in the summary.
+  - `failed`: an error.
+  - `stopped`: emergency stop.
+- **Re-running is safe and incremental.** A document is skipped only if its SHA-256 is unchanged and its output exists. A changed document starts over; the old run is kept, renamed.
+- **Unattended vs interactive:**
+  - Default is unattended: no pop-ups after the start. The reader setup reminder is shown once at the start; `--no-prompt` skips it for scheduled runs.
+  - `--interactive` pauses on problems with a message box instead, which suits a first run on a new kind of document.
+- **Stopping:** press Ctrl+Shift+F12, or create a file named `STOP` in `<out>\_runs\`. Either stops the whole batch after the current step.
+- **Time limit:** `--time-limit 240` stops a document whose capture runs over 240 minutes (resumable), so one stuck document cannot hold up the batch.
+- **Options for every document:** `--config my.yaml` applies a configuration to every document. Also available: `--lang eng+deu`, `--workers N`, `--max-pages N`, `--no-pdf`.
+
+## Large documents
+
+Capture is sequential: one reader on one screen, about 0.5–1.5 s per page depending on how fast the reader renders. Everything else is built so that cost per page stays flat for documents with thousands of pages:
+
+- **Parallel OCR while capturing.** Each page goes to a pool of Tesseract processes as soon as it is captured (default: CPU count − 1, at most 8; `--workers`). A single Tesseract pass per page produces the text, word data and the page's searchable PDF.
+- **Streaming PDF assembly.** Page PDFs are merged with qpdf (pikepdf) in chunks of 200, so memory does not grow with the page count. Per-page intermediates are deleted afterwards unless `pdf.keep_page_pdfs: true`.
+- **Constant-cost state.** Every page is saved as its own small record (`records/page_NNNN.json`). The run summary is rewritten at most every 5 s, not after every page. A crash loses no captured page, and `resume` continues from the next page.
+- **Verification sampling.** The PDF text-layer check covers 60 evenly spaced pages (`pdf.verify_sample_pages`), plus an exact page count.
+
+Measured on a 4-core Linux machine with a simulated reader, 1100×1430-pixel pages, 30 lines of text each:
+
+| Pages | OCR workers | Capture | OCR left after capture | PDF assembly | Total | Searchable PDF |
+|---|---|---|---|---|---|---|
+| 120 | 1 | 74 s | 121 s | 7 s | 204 s | 35 MB |
+| 120 | 3 | 74 s | 1 s | 7 s | 83 s | 35 MB |
+| 300 | 3 | 249 s | 1 s | 7 s | 259 s | 88 MB |
+
+With 3 workers, OCR fully overlaps capture. With a real reader, capture time depends on the reader's rendering speed.
+
+Sizing guide. These are rough estimates; time a 50-page document on your reader and machine to get real numbers.
+
+- **Disk:** plan for about 1–2 MB per page in the run folder (PNG captures; per-page PDFs are deleted after merging) and 0.3–1 MB per page for the searchable PDF, depending on the page content. `pdf.image_format: jpeg` makes the PDF several times smaller. `doctor --out-dir D:\OCR` checks free space.
+- **Time:** capture is bounded by the stability check (`min_wait_s` + 3 × `interval_s` ≈ 1 s with the defaults) plus the reader's own rendering time. On a machine with enough cores for OCR to keep up, little work remains after the last page.
+- **Limits:** `document.max_pages` defaults to 5000 per document. Raise it in a config file, or use `--max-pages`, for longer documents.
 
 ## How it works
 
@@ -137,7 +228,7 @@ These steps depend on the reader. Some cannot be automated reliably, so the prof
 
 | Step | Why | Automated? |
 |---|---|---|
-| Use **Single Page** layout, not continuous | Each "next page" should show exactly one page, starting at its top | No. Acrobat and PDF-XChange have no default shortcut, so the setup checkpoint asks you to do it |
+| Use **Single Page** layout, not continuous | Each "next page" should show exactly one page, starting at its top | Set once in the reader's *Preferences > Page Display*, which then applies to every document. Checked automatically: if more than one page is visible, or the page is cut off, the document pauses (interactive) or is set aside as `needs_attention` (batch) |
 | Zoom: **fit page** (`fit_page` mode) or **fit width** (`scroll` mode) | Fit page gives one capture per page; fit width gives larger text for OCR | Partly. `prepare_keys` (Acrobat `Ctrl+0`) |
 | Close side panels, banners and tool panes that overlap the page | They would be captured or would shrink the page | No (setup checkpoint) |
 | Keep the reader on **one monitor**, ideally maximised | Avoids mixed-DPI rectangles | Checked: a manual checkpoint fires if the document area spans monitors with different scaling or is off-screen |
@@ -201,7 +292,21 @@ Rules are evaluated in order: yours first, then the profile's. A `click`/`keys` 
 
 ## CLI usage
 
-All commands are run as `python -m doc_capture_harness <command>`. Viewer commands need Windows and an interactive desktop. `ocr` and `report` work anywhere.
+All commands are run as `python -m doc_capture_harness <command>`. Viewer commands need Windows and an interactive desktop. `ocr`, `pdf`, `report` and `batch --dry-run` work anywhere.
+
+Check that this machine is ready:
+
+```powershell
+python -m doc_capture_harness doctor
+```
+
+One document, no config file needed:
+
+```powershell
+python -m doc_capture_harness run C:\Docs\statement.pdf --known-pages 42
+```
+
+Many documents: see [Batch processing](#batch-processing).
 
 Inspect the environment: list windows, monitors and scaling.
 
@@ -449,4 +554,5 @@ The tests cover:
 - stability detection, page cropping, overlap stitching and duplicate hashing
 - the prompt policy, including security acknowledgement, unknown dialogs, obstructions and `max_times`
 - end-to-end simulated runs: indicator-driven ends, identical pages, the no-indicator end probe, known-page-count checkpoints, flaky navigation, the `max_pages` limit, dialogs, emergency stop with resume, refusal to resume a changed document, scroll-mode stitching, unattended abort, and real OCR when Tesseract is installed
+- scale and automation: batch processing (skip finished documents, retry ones set aside, mirrored outputs), the batch-wide STOP file, CSV inputs, a 600-page document with flat per-page cost, page records surviving a stale header, chunked PDF merging, page PDFs reused from the OCR pass, layout detection (continuous and zoomed), and the per-document time limit
 - searchable PDF output: text layer extraction, page size and metadata from the original, encrypted originals left encrypted, refusal to overwrite the original, writing next to the original with overwrite protection, placeholder pages, and the image-only fallback

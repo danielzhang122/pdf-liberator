@@ -42,10 +42,13 @@ def parse_hotkey(spec: str) -> list[int]:
 
 
 class EmergencyStopMonitor:
-    def __init__(self, hotkey: Optional[str], stop_file: Optional[Path], poll_s: float = 0.05):
+    def __init__(self, hotkey: Optional[str], stop_file: Optional[Path], poll_s: float = 0.05,
+                 extra_stop_files: tuple[Path, ...] = ()):
         self._event = threading.Event()
         self.reason: str = ""
         self.stop_file = stop_file
+        # Watched but never deleted here (e.g. the batch-wide STOP file).
+        self.extra_stop_files = tuple(extra_stop_files)
         self._codes = parse_hotkey(hotkey) if hotkey else []
         self._poll_s = poll_s
         self._thread: Optional[threading.Thread] = None
@@ -74,8 +77,9 @@ class EmergencyStopMonitor:
 
     def check(self) -> None:
         """Raise :class:`EmergencyStop` if a stop was requested."""
-        if self.stop_file is not None and self.stop_file.exists():
-            self.trigger(f"stop file present: {self.stop_file}")
+        for f in ((self.stop_file,) if self.stop_file else ()) + self.extra_stop_files:
+            if f.exists():
+                self.trigger(f"stop file present: {f}")
         if self._event.is_set():
             raise EmergencyStop(self.reason or "emergency stop")
 
@@ -100,7 +104,8 @@ class EmergencyStopMonitor:
                 if all(get_state(c) & 0x8000 for c in self._codes):
                     self.trigger("emergency-stop hotkey pressed")
                     return
-            if self.stop_file is not None and self.stop_file.exists():
-                self.trigger(f"stop file present: {self.stop_file}")
-                return
+            for f in ((self.stop_file,) if self.stop_file else ()) + self.extra_stop_files:
+                if f.exists():
+                    self.trigger(f"stop file present: {f}")
+                    return
             time.sleep(self._poll_s)
