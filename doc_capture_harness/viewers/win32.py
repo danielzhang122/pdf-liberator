@@ -246,6 +246,9 @@ class Win32ViewerAdapter(ViewerAdapter):
             "virtual_screen": pw.virtual_screen().to_dict(),
         }
 
+    def screen_layout(self, rect: Rect):
+        return pw.virtual_screen(), pw.monitors_for_rect(rect)
+
     def park_cursor(self) -> None:
         wr = self.window_rect()
         dr = self.document_rect()

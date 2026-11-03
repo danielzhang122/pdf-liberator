@@ -77,6 +77,13 @@ class ViewerAdapter(abc.ABC):
     def environment_info(self) -> dict:
         return {}
 
+    def screen_layout(self, rect: Rect) -> Optional[tuple[Rect, list]]:
+        """(virtual desktop rect, monitors overlapping ``rect``) or None if unknown.
+
+        Monitors need ``device`` and ``scale`` attributes.
+        """
+        return None
+
     def park_cursor(self) -> None:
         """Move the mouse pointer off the document so hover effects are not captured."""
 

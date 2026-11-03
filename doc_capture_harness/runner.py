@@ -193,15 +193,13 @@ class Harness:
         return r
 
     def _check_rect_on_screen(self, r: Rect) -> None:
-        try:
-            from . import platform_win as pw
-        except Exception:
+        layout = self.adapter.screen_layout(r)
+        if layout is None:
             return
-        vs = pw.virtual_screen()
+        vs, mons = layout
         if r.intersect(vs) != r:
             self.checkpoint("offscreen", f"The document area {r.to_dict()} is partly outside the desktop "
                                          f"{vs.to_dict()}. Move/maximize the reader window, then Retry.")
-        mons = pw.monitors_for_rect(r)
         scales = {m.scale for m in mons}
         if len(mons) > 1:
             event(self.log, "multi_monitor_span", "document area spans several monitors", level=30,
