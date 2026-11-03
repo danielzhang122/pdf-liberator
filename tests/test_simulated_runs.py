@@ -1,0 +1,213 @@
+"""End-to-end runs of the real runner against the simulated reader."""
+import json
+import os
+import stat
+
+from conftest import fast_config, needs_tesseract
+from doc_capture_harness.models import EndReason, Flag
+from doc_capture_harness.runner import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, EXIT_WARNINGS, Harness
+from fakes import FakeDialog, FakeSource, FakeViewer, Scenario, make_page
+
+
+def run(cfg, scenario, run_dir, responder=None, resume=False, skip_ocr=True):
+    holder = {}
+
+    def af(checkpoint, estop):
+        holder["v"] = FakeViewer(scenario, cfg.viewer, estop, checkpoint)
+        return holder["v"]
+
+    def sf(adapter):
+        return FakeSource(adapter)
+
+    def default_responder(reason, msg):
+        raise AssertionError(f"unexpected checkpoint {reason}: {msg}")
+
+    h = Harness(cfg, run_dir, af, sf, responder=responder or default_responder, resume=resume,
+                skip_ocr=skip_ocr)
+    code = h.run()
+    report = json.loads((run_dir / "report.json").read_text())
+    return code, h, report, holder.get("v")
+
+
+def flags(report, page):
+    return report["pages"][page - 1]["flags"]
+
+
+def test_indicator_driven_run(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 6)])
+    code, h, rep, v = run(cfg, sc, tmp_path / "r1")
+    assert code == EXIT_OK, rep
+    assert rep["pages_captured"] == 5
+    assert rep["end"]["reason"] == EndReason.INDICATOR_TOTAL.value
+    assert not rep["end_is_uncertain"]
+    assert sorted(os.listdir(tmp_path / "r1" / "pages")) == [f"page_000{i}.png" for i in range(1, 6)]
+    # Cropped to the page, not the grey viewport.
+    w, hgt = rep["pages"][0]["size"]
+    assert w < 800 and hgt < 900
+    # Original untouched; opened copy is read-only.
+    assert rep["document_unchanged"]
+    copy = tmp_path / "r1" / "work" / doc.name
+    assert v.launched == copy and not (os.stat(copy).st_mode & stat.S_IWRITE)
+
+
+def test_identical_pages_with_indicator_are_kept(doc, tmp_path):
+    cfg = fast_config(doc)
+    p2 = make_page(2)
+    sc = Scenario([make_page(1), p2, p2.copy(), make_page(4)])
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 4
+    assert Flag.IDENTICAL_PREV in flags(rep, 3)
+
+
+def test_no_indicator_end_confirmed_by_probe(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 5)], indicator=False)
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 4
+    assert rep["end"]["reason"] == EndReason.STALL_CONFIRMED.value
+    assert rep["end_is_uncertain"] and code == EXIT_WARNINGS
+    assert Flag.NO_INDICATOR in flags(rep, 2)
+
+
+def test_no_indicator_identical_pages_are_flagged_and_checkpointed(doc, tmp_path):
+    """Identical consecutive pages without an indicator are ambiguous: a retry
+    key press may skip a page. The harness must flag it for review, and with a
+    known page count it asks the operator instead of declaring the end."""
+    cfg = fast_config(doc, document={"known_page_count": 4})
+    p2 = make_page(2)
+    sc = Scenario([make_page(1), p2, p2.copy(), make_page(4)], indicator=False)
+    asked = []
+
+    def responder(reason, msg):
+        asked.append(reason)
+        return "continue"       # operator confirms the reader now shows page 3
+
+    code, h, rep, v = run(cfg, sc, tmp_path / "r", responder)
+    assert asked == ["navigation_failed"]
+    assert rep["pages_captured"] == 4
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
+    assert Flag.NAV_RETRY_UNVERIFIED in flags(rep, 3)
+    assert Flag.MANUAL_OVERRIDE in flags(rep, 4)
+    assert code == EXIT_WARNINGS
+    assert {r["page"] for r in rep["pages_needing_review"]} == {3, 4}
+
+
+def test_flaky_navigation_is_retried(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 4)], stuck_next={1: 1})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["pages_captured"] == 3
+
+
+def test_max_pages_limit(doc, tmp_path):
+    cfg = fast_config(doc, document={"max_pages": 3})
+    sc = Scenario([make_page(i) for i in range(1, 7)], indicator=False)
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 3
+    assert rep["end"]["reason"] == EndReason.MAX_PAGES.value and rep["end_is_uncertain"]
+
+
+def test_dialogs_known_and_unknown(doc, tmp_path):
+    cfg = fast_config(doc, prompts={"rules": [
+        {"name": "tip", "title_re": "Tip of the day", "action": "click", "button": "Close"}]})
+    sc = Scenario([make_page(i) for i in range(1, 5)], dialogs_on_page={
+        2: FakeDialog("Tip of the day", ["Did you know?"], ["Close"]),
+        3: FakeDialog("Mystery", ["Unexpected thing"], ["OK"]),
+        4: FakeDialog("Security Warning", ["Enable JavaScript for this document?"], ["Enable", "Close"]),
+    })
+    holder = {}
+    asked = []
+
+    def responder(reason, msg):
+        asked.append((reason, msg.split("\n")[0]))
+        holder["v"].dismiss_all()   # operator handles it in the reader
+        return "retry"
+
+    def af(checkpoint, estop):
+        holder["v"] = FakeViewer(sc, cfg.viewer, estop, checkpoint)
+        return holder["v"]
+
+    h = Harness(cfg, tmp_path / "r", af, lambda a: FakeSource(a), responder=responder, skip_ocr=True)
+    h.run()
+    rep = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert rep["pages_captured"] == 4
+    assert [a[0] for a in asked] == ["dialog", "dialog"]       # unknown + security, not the tip
+    assert rep["prompts_handled"] >= 3 and rep["manual_checkpoints"] == 2
+
+
+def test_emergency_stop_then_resume(doc, tmp_path):
+    cfg = fast_config(doc)
+    rd = tmp_path / "r"
+    pages = [make_page(i) for i in range(1, 7)]
+
+    def stop_on_4(n):
+        if n == 4:
+            (rd / "STOP").write_text("stop")
+
+    code, h, rep, v = run(cfg, Scenario(pages, on_page_shown=stop_on_4), rd)
+    assert code == EXIT_STOPPED and rep["status"] == "stopped"
+    done = rep["pages_captured"]
+    assert 3 <= done < 6
+
+    # Resume: the stale STOP file is cleared and capture continues where it stopped.
+    sc2 = Scenario(pages)
+    code, h, rep, v = run(cfg, sc2, rd, resume=True)
+    assert code == EXIT_OK, rep
+    assert rep["pages_captured"] == 6 and rep["sessions"] == 2
+    log = (rd / "logs" / "harness.jsonl").read_text()
+    assert f'"resuming at page {done + 1}"' in log
+
+
+def test_resume_refuses_changed_document(doc, tmp_path):
+    cfg = fast_config(doc)
+    rd = tmp_path / "r"
+    run(cfg, Scenario([make_page(1), make_page(2)]), rd)
+    before = (rd / "manifest.json").read_text()
+    doc.write_bytes(b"changed")
+    code, h, rep, v = run(cfg, Scenario([make_page(1)]), rd, resume=True)
+    assert code == EXIT_FAILED
+    assert (rd / "manifest.json").read_text() == before        # previous run untouched
+    assert "hash changed" in (rd / "logs" / "harness.jsonl").read_text()
+
+
+def test_scroll_mode_stitches_tall_pages(doc, tmp_path):
+    cfg = fast_config(doc, capture={"mode": "scroll", "scroll": {"wheel_notches": 6}})
+    pages = [make_page(i, 600, 1900, lines=36) for i in range(1, 3)]
+    sc = Scenario(pages, fit="width", viewport=(640, 700), loading_grabs=1)
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 2, rep
+    w, hgt = rep["pages"][0]["size"]
+    scaled_h = int(1900 * (600 / 600))
+    assert abs(hgt - scaled_h) < 30, (w, hgt)
+    assert Flag.STITCH_UNCERTAIN not in flags(rep, 1)
+
+
+def test_unattended_abort_on_unknown_dialog(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(1), make_page(2)], dialogs_on_page={2: FakeDialog("Mystery", ["?"], ["OK"])})
+
+    def af(checkpoint, estop):
+        return FakeViewer(sc, cfg.viewer, estop, checkpoint)
+
+    h = Harness(cfg, tmp_path / "r", af, lambda a: FakeSource(a), skip_ocr=True)   # manual.mode=abort
+    code = h.run()
+    rep = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert code == EXIT_STOPPED and rep["status"] == "aborted" and rep["pages_captured"] == 1
+    assert any(p.endswith(".png") for p in os.listdir(tmp_path / "r" / "diagnostics"))
+
+
+@needs_tesseract
+def test_full_run_with_ocr(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 4)])
+    code, h, rep, v = run(cfg, sc, tmp_path / "r", skip_ocr=False)
+    assert code == EXIT_OK, rep["pages_needing_review"]
+    ocr_dir = tmp_path / "r" / "ocr"
+    for i in range(1, 4):
+        assert f"Page {i}" in (ocr_dir / f"page_000{i}.txt").read_text()
+    combined = (ocr_dir / "combined.txt").read_text()
+    assert combined.index("===== Page 1 =====") < combined.index("===== Page 2 =====") < combined.index("===== Page 3 =====")
+    assert rep["ocr"]["mean_of_page_mean_conf"] > 80
+    md = (tmp_path / "r" / "report.md").read_text()
+    assert "Per-page detail" in md

@@ -1,0 +1,126 @@
+# Example configuration for doc_capture_harness.
+# Only use with documents you own or are authorised to test.
+#
+# Anything omitted falls back to the viewer profile, then to built-in defaults.
+# Unknown keys are rejected, so typos fail fast. Paths: use forward slashes or
+# single-quoted Windows paths.
+
+document:
+  path: 'C:/TestDocs/sample-wrapped.pdf'
+  open_copy: true            # open a read-only copy in <run>/work; set false if the wrapper/licence is bound to the original path
+  known_page_count: null     # set when known: makes end-of-document detection exact
+  max_pages: 300             # hard safety cap
+  start_page: 1
+
+viewer:
+  profile: acrobat           # acrobat | pdfxchange | generic
+  executable: null           # null = try the profile's executable_candidates
+  attach_only: false         # true = do not launch; attach to an already-open window
+  launch_timeout_s: 90
+  # window_title_re: '(?i){stem}'           # {stem}/{name} = document file name, regex-escaped
+  # process_names: [Acrobat.exe, AcroRd32.exe]
+  # document_pane: {class_name: AVL_AVView, title: AVPageView}   # find with `calibrate`
+  # viewport_margins: [0, 120, 0, 30]       # used only if document_pane is not found
+  # keys:
+  #   next_page: '{RIGHT}'
+  #   prev_page: '{LEFT}'
+  #   alt_next_page: ['{PGDN}']
+  prepare_keys: ['^0']       # Acrobat Ctrl+0 = zoom to page level
+  # setup_checkpoint: manual step shown once after opening (the acrobat and
+  # pdfxchange profiles ask you to switch to Single Page view). Set null to skip.
+  page_indicator:
+    enabled: true
+    # ocr_region: [300, 60, 160, 30]        # fallback: [x, y, w, h] relative to the window
+  busy:
+    title_re: '(?i)\b(loading|please wait|not responding)\b'
+    check_cursor: true
+    check_hung: true
+  focus_pane_by_click: false   # clicking can trigger links or form fields
+  close_on_finish: false
+
+capture:
+  method: screen             # screen (mss) | printwindow (works while covered; may be black for GPU-rendered views)
+  mode: fit_page             # fit_page | scroll (fit width + overlapping slices for tall pages)
+  stability:
+    interval_s: 0.25
+    required_stable_frames: 3
+    pixel_threshold: 10
+    changed_fraction_threshold: 0.0008
+    min_wait_s: 0.3
+    timeout_s: 20
+  scroll:
+    method: wheel            # wheel | keys (uses viewer.keys.scroll_down)
+    wheel_notches: 5
+    max_slices: 40
+  crop:
+    auto_page: true
+    canvas_tolerance: 14
+    padding: 4
+  retries: 3                 # capture attempts beyond the first
+  nav_retries: 2             # next-page attempts beyond the first (alt keys used on retries)
+  same_page_threshold: 0.0015
+  # Text the wrapper shows while it is not ready; checked with a quick OCR pass.
+  placeholder_text_re:
+    - '(?i)please wait'
+    - '(?i)loading'
+    - '(?i)(enable|requires) javascript'
+    - '(?i)open (this|the) document in'
+  placeholder_wait_s: 5
+  end_probe: true
+
+ocr:
+  enabled: true
+  tesseract_cmd: 'C:/Program Files/Tesseract-OCR/tesseract.exe'
+  lang: eng                  # e.g. eng+deu (install the traineddata first)
+  psm: 3                     # 3 = auto layout; 4 or 6 can be better for single-column text
+  oem: 1
+  low_word_conf: 60
+  page_min_mean_conf: 70
+  page_max_low_conf_ratio: 0.25
+  min_word_height_px: 10
+  save_tsv: true
+
+prompts:
+  unknown_action: manual     # manual | abort  (unknown dialogs are never dismissed)
+  obstruction_action: manual
+  startup_timeout_s: 90
+  # Rules are checked in order, before the profile's built-in rules.
+  # Actions: click | keys | wait | manual | abort | ignore
+  # click/keys on a dialog that looks security-related (JavaScript, trust,
+  # certificate, password, permission, ...) also need acknowledge_security: true.
+  rules:
+    - name: untagged-document-notice
+      text_re: '(?i)reading untagged document'
+      action: click
+      button: Cancel
+      max_times: 3
+    - name: preparing-document-progress
+      title_re: '(?i)^(preparing|loading)'
+      action: wait
+      wait_s: 2
+      max_times: 30
+    - name: wrapper-js-consent
+      text_re: '(?i)javascript'
+      action: manual           # an operator decides, every time
+  ignore_title_re: []
+
+manual:
+  mode: messagebox           # messagebox | console | abort (unattended)
+  beep: true
+
+safety:
+  estop_hotkey: 'ctrl+shift+f12'
+  stop_file_name: STOP
+  pyautogui_failsafe: true
+  allow_pyautogui_fallback: true
+
+output:
+  root: runs
+  run_name: null             # default: <document stem>_<timestamp>
+  diagnostics_full_screen: false   # true captures the whole virtual desktop on failure
+  png_compress_level: 6
+  save_raw_slices: false
+
+logging:
+  level: INFO
+  console: true
