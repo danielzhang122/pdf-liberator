@@ -116,8 +116,11 @@ def crop_to_page(img: Image.Image, tolerance: int = 14, padding: int = 4,
     # this ignores thin scrollbars, page shadows and stray cursor pixels.
     row_share = diff.mean(axis=1)
     col_share = diff.mean(axis=0)
-    rows = np.where(row_share > 0.15)[0]
-    cols = np.where(col_share > 0.15)[0]
+    # Thresholds are relative to the strongest row/column, so a floating
+    # toolbar or scrollbar over the canvas (covering only part of the height
+    # or width) is not mistaken for part of the page.
+    rows = np.where(row_share > max(0.15, 0.5 * float(row_share.max())))[0]
+    cols = np.where(col_share > max(0.15, 0.5 * float(col_share.max())))[0]
     if rows.size == 0 or cols.size == 0:
         return CropResult(img, (0, 0, w, h), True, canvas)
     top, bottom = int(rows[0]), int(rows[-1]) + 1

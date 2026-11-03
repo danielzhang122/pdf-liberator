@@ -19,6 +19,15 @@ _SAVE_CHANGES_NO = {
     "button": "No",
     "max_times": 3,
 }
+# Newer Acrobat shows untitled floating tool strips (quick tools, selection
+# toolbar) as separate AVL_AVPopup windows. They are reader chrome, not dialogs;
+# when they float over the grey canvas the page crop leaves them out.
+_ACROBAT_TOOLBARS = {
+    "name": "acrobat-floating-toolbars",
+    "class_re": r"^AVL_AVPopup$",
+    "title_re": r"^$",
+    "action": "ignore",
+}
 _JS_MANUAL = {
     "name": "javascript-prompt-requires-operator",
     "text_re": r"(?i)javascript",
@@ -61,7 +70,7 @@ PROFILES: dict[str, dict] = {
             "that cover the page (they stay closed). Make sure no other Acrobat window "
             "covers the screen."
         ),
-        "_prompt_rules": [_JS_MANUAL, _SAVE_CHANGES_NO],
+        "_prompt_rules": [_ACROBAT_TOOLBARS, _JS_MANUAL, _SAVE_CHANGES_NO],
     },
     "pdfxchange": {
         "executable_candidates": [

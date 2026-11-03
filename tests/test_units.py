@@ -275,3 +275,26 @@ def test_rules_for_other_apps_need_scope(monkeypatch):
 def test_commented_out_config_sections_load():
     cfg = build_config({"prompts": {"rules": None}, "ocr": None})
     assert cfg.prompts.rules == [] and cfg.ocr.lang == "eng"
+
+
+def test_crop_ignores_floating_toolbar_on_canvas():
+    page = make_page(1)
+    vp = _viewport_with_page(page)                       # page at (100, 60)
+    from PIL import ImageDraw
+    ImageDraw.Draw(vp).rectangle([8, 200, 48, 520], fill=(245, 245, 245))   # tool strip left of the page
+    res = crop_to_page(vp, padding=0)
+    l, t, r, b = res.box
+    assert abs(l - 100) <= 1 and abs(t - 60) <= 1 and abs((r - l) - page.width) <= 2
+
+
+def test_acrobat_profile_ignores_floating_toolbars():
+    cfg = build_config({"viewer": {"profile": "acrobat"}})
+    tb = DialogInfo(7, "", "AVL_AVPopup", 1, Rect(0, 0, 50, 300), [], ["Select text", "Add a comment"], True)
+    ad = _DlgAdapter([tb])
+    h = PromptHandler(cfg.prompts, ad, lambda r, m: (_ for _ in ()).throw(AssertionError(r)),
+                      EmergencyStopMonitor(None, None))
+    h.handle(None)
+    assert h.stats.handled[0]["action"] == "ignore"
+    titled = DialogInfo(8, "Something", "AVL_AVPopup", 1, Rect(0, 0, 50, 300), ["?"], ["OK"], True)
+    from doc_capture_harness.prompts import rule_matches
+    assert not any(rule_matches(r, titled) for r in cfg.prompts.rules if r.name == "acrobat-floating-toolbars")
