@@ -3,8 +3,8 @@ rem Drag one or more PDFs or folders onto this file, or double-click it and past
 rem Results go to an "ocr_output" folder next to the input. Re-running continues where it stopped.
 setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-  echo First-time setup is needed. Running install.ps1 ...
+if not exist ".venv\setup-ok.txt" (
+  echo Setup is needed. Running install.ps1 ...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
   if errorlevel 1 goto :failed
 )

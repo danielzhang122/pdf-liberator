@@ -1,0 +1,26 @@
+name: windows-setup
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  install-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.ps1 exactly as Capture.bat does
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+      - name: Setup marker written
+        shell: cmd
+        run: if not exist .venv\setup-ok.txt exit 1
+      - name: Tests on Windows
+        shell: cmd
+        run: .venv\Scripts\python.exe -m pytest -q
+      - name: CLI smoke test
+        shell: cmd
+        run: |
+          .venv\Scripts\python.exe -m doc_capture_harness --version
+          .venv\Scripts\python.exe -m doc_capture_harness batch tests --dry-run

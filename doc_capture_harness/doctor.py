@@ -30,7 +30,10 @@ def _check_imports(results):
 def _check_python(results):
     v = sys.version_info
     bits = 64 if sys.maxsize > 2 ** 32 else 32
-    if v < (3, 10):
+    if v >= (3, 14):
+        results.append((FAIL, "Python", f"{v.major}.{v.minor} is too new for some packages",
+                        "use Python 3.12 (install.ps1 sets this up automatically)"))
+    elif v < (3, 10):
         results.append((FAIL, "Python", f"{v.major}.{v.minor} ({bits}-bit)", "install Python 3.10 or newer (64-bit)"))
     elif bits != 64:
         results.append((WARN, "Python", f"{v.major}.{v.minor} 32-bit", "64-bit Python is recommended for large documents"))
