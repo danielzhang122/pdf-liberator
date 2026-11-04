@@ -70,6 +70,22 @@ class OriginalInfo:
         finally:
             pypdf_log.setLevel(old_level)
 
+    def page_labels(self) -> Optional[list[str]]:
+        """Page labels (e.g. i, ii, 1, 2); None if unreadable or encrypted."""
+        if not self.readable:
+            return None
+        import logging
+        pypdf_log = logging.getLogger("pypdf")
+        old = pypdf_log.level
+        pypdf_log.setLevel(logging.ERROR)
+        try:
+            from pypdf import PdfReader
+            return [str(x) for x in PdfReader(str(self.path)).page_labels]
+        except Exception:
+            return None
+        finally:
+            pypdf_log.setLevel(old)
+
     def size_for(self, page_no: int) -> Optional[tuple[float, float]]:
         if not self.sizes:
             return None

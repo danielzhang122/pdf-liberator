@@ -49,6 +49,9 @@ class Win32ViewerAdapter(ViewerAdapter):
         self._indicator_cache = ScanCache(self._scan_indicator, retry_after_s=60.0)
         self._desc_cache: dict[int, tuple] = {}
         self._pane_el = None
+        # Page labels of the document (e.g. i, ii, 1, 2 ...), if readable: Acrobat's Go To
+        # Page dialog takes labels when "Use logical page numbers" is on (the default).
+        self.page_labels: Optional[list[str]] = None
         self._ignore_title = [re.compile(p) for p in (ignore_title_re or [])]
 
     # ------------------------------------------------------------------ lifecycle
@@ -211,6 +214,13 @@ class Win32ViewerAdapter(ViewerAdapter):
         if pw.is_minimized(self.hwnd):
             pw.restore_window(self.hwnd)
         try:
+            pw.force_foreground(self.hwnd)          # works while another process holds the foreground
+        except Exception as exc:
+            event(self.log, "force_foreground_failed", str(exc), level=10)
+        self.estop.sleep(0.1)
+        if self.is_foreground():
+            return True
+        try:
             self._uia.wrapper_object().set_focus()
         except Exception as exc:
             event(self.log, "set_focus_failed", str(exc), level=30)
@@ -255,17 +265,23 @@ class Win32ViewerAdapter(ViewerAdapter):
         return pw.virtual_screen(), pw.monitors_for_rect(rect)
 
     def page_count_hint(self) -> Optional[int]:
-        """Open the go-to-page dialog, read "of N" from it, and cancel it."""
+        """Open the go-to-page dialog, read "of N" from it, and cancel it (3 attempts)."""
         if not self.cfg.keys.goto_page or not self.cfg.goto_dialog_title_re:
             return None
-        try:
-            self.send_keys(self.cfg.keys.goto_page)
-        except Exception as exc:
-            event(self.log, "page_count_probe", f"could not open the go-to-page dialog: {exc}", level=30)
-            return None
-        dlg = self._wait_goto_dialog()
+        dlg = None
+        for attempt in range(3):
+            self.close_stray_goto_dialogs()
+            try:
+                self.send_keys(self.cfg.keys.goto_page)
+            except FocusLost as exc:
+                event(self.log, "page_count_probe", f"attempt {attempt + 1}: {exc}", level=30)
+                continue
+            dlg = self._wait_goto_dialog()
+            if dlg is not None:
+                break
+            event(self.log, "page_count_probe", f"attempt {attempt + 1}: go-to-page dialog did not appear",
+                  level=30)
         if dlg is None:
-            event(self.log, "page_count_probe", "go-to-page dialog did not appear", level=30)
             return None
         total = None
         for t in dlg.texts + dlg.buttons:
@@ -287,11 +303,11 @@ class Win32ViewerAdapter(ViewerAdapter):
         except Exception as exc:
             info["fg_error"] = str(exc)
         try:
-            el = self._iuia().iuia.GetFocusedElement()
-            info.update(focus_name=el.CurrentName, focus_type=self._CT_NAMES.get(el.CurrentControlType,
-                        el.CurrentControlType), focus_class=el.CurrentClassName,
-                        focus_hwnd=el.CurrentNativeWindowHandle, focus_is_pane=(
-                            bool(self._pane_hwnd) and el.CurrentNativeWindowHandle == self._pane_hwnd))
+            # Plain Win32 (no UI Automation call into the page view, which can make
+            # Acrobat start its slow accessibility pass).
+            fh = pw.focused_window()
+            info.update(focus_hwnd=fh, focus_class=pw.get_class_name(fh) if fh else "",
+                        focus_is_pane=bool(self._pane_hwnd) and fh == self._pane_hwnd)
         except Exception as exc:
             info["focus_error"] = str(exc)
         return info
@@ -603,10 +619,12 @@ class Win32ViewerAdapter(ViewerAdapter):
 
     # ------------------------------------------------------------------ input
     def _ensure_focus(self) -> None:
-        for _ in range(3):
+        for attempt in range(6):                     # about 3 s in total before giving up
             if self.is_foreground():
                 return
-            self.bring_to_foreground()
+            if self.bring_to_foreground():
+                return
+            self.estop.sleep(0.1 * (attempt + 1))
         if not self.is_foreground():
             raise FocusLost("viewer window could not be brought to the foreground")
 
@@ -645,6 +663,16 @@ class Win32ViewerAdapter(ViewerAdapter):
             self.estop.sleep(0.08)
         return None
 
+    def close_stray_goto_dialogs(self) -> int:
+        """Close go-to-page dialogs left open (e.g. one that appeared after a timeout)."""
+        if not self.cfg.goto_dialog_title_re:
+            return 0
+        title_re = re.compile(self.cfg.goto_dialog_title_re)
+        stray = [d for d in self.list_dialogs(None) if d.owned_by_viewer and title_re.search(d.title)]
+        for d in stray:
+            self._close_dialog(d)
+        return len(stray)
+
     def open_goto_dialog_and_enter(self, n: int) -> bool:
         """Go to page ``n``: open the go-to-page dialog (one shortcut), put the number into
         its edit box with WM_SETTEXT and press OK with BM_CLICK - no further key presses,
@@ -660,12 +688,13 @@ class Win32ViewerAdapter(ViewerAdapter):
         edit = next((h for h, cls, _t, _r in kids if "edit" in cls.lower()), None)
         ok_btn = self._dialog_button(kids, "ok")
         done = False
-        if edit and ok_btn and pw.set_window_text(edit, str(n)):
-            done = pw.post_message(ok_btn, 0x00F5)                   # BM_CLICK
+        text = self.page_labels[n - 1] if self.page_labels and n <= len(self.page_labels) else str(n)
+        if edit and ok_btn and pw.set_window_text(edit, text):
+            done = pw.click_dialog_command(dlg.handle, ok_btn) or pw.post_message(ok_btn, 0x00F5)
         else:
             event(self.log, "goto_dialog_controls", "edit box or OK button not found; typing instead", level=30,
                   children=[(cls, t) for _h, cls, t, _r in kids][:20])
-            done = self.send_dialog_keys(dlg, "^a" + str(n) + "{ENTER}")
+            done = self.send_dialog_keys(dlg, "^a" + text + "{ENTER}")
         if self._wait_closed(dlg.handle, 4.0):
             return done
         # Still open (e.g. the number was rejected): close it and report failure.
@@ -689,7 +718,8 @@ class Win32ViewerAdapter(ViewerAdapter):
         """Close a dialog without relying on keyboard focus: Cancel (BM_CLICK), then WM_CLOSE."""
         cancel = self._dialog_button(pw.child_windows(dlg.handle), "cancel")
         if cancel:
-            pw.post_message(cancel, 0x00F5)
+            if not pw.click_dialog_command(dlg.handle, cancel):
+                pw.post_message(cancel, 0x00F5)
             if self._wait_closed(dlg.handle, 2.0):
                 return True
         pw.post_message(dlg.handle, 0x0010)                          # WM_CLOSE

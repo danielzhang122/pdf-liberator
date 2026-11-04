@@ -34,7 +34,7 @@ _ACROBAT_STRAY_GOTO = {
     "title_re": r"^Go To Page$",
     "action": "click",
     "button": "Cancel",
-    "max_times": 20,
+    "max_times": 100000,
 }
 _JS_MANUAL = {
     "name": "javascript-prompt-requires-operator",

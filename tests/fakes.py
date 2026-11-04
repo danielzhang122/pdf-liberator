@@ -72,6 +72,7 @@ class Scenario:
     popup_on_next: dict = field(default_factory=dict)
     # pages where one "next" key press moves two pages (a delayed key press applied late)
     double_next_on: set = field(default_factory=set)
+    goto_fail_times: int = 0                # the go-to dialog fails this many times first
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -132,6 +133,10 @@ class FakeViewer(ViewerAdapter):
 
     def open_goto_dialog_and_enter(self, n: int) -> bool:
         if not self.s.goto_dialog or not (1 <= n <= len(self.s.pages)):
+            return False
+        self.goto_calls = getattr(self, "goto_calls", 0) + 1
+        if self.s.goto_fail_times > 0:
+            self.s.goto_fail_times -= 1
             return False
         self.page, self.scroll = n - 1, 0
         self._show()

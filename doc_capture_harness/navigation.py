@@ -65,31 +65,53 @@ class Navigator:
                                           "and choose Retry.")
             return fn(*args)
 
+    def _goto_number(self, target: int) -> bool:
+        """Open the go-to-page dialog and enter ``target``; up to 3 attempts (a stray dialog
+        from a failed attempt is closed first)."""
+        for attempt in range(3):
+            self.adapter.close_stray_goto_dialogs()
+            try:
+                if self.adapter.open_goto_dialog_and_enter(target):
+                    return True
+            except FocusLost as exc:
+                event(self.log, "goto_focus_lost", f"attempt {attempt + 1}: {exc}", level=30)
+            event(self.log, "goto_retry", f"go-to-page dialog failed for page {target} (attempt {attempt + 1})",
+                  level=30)
+        self.adapter.close_stray_goto_dialogs()
+        return False
+
     def _advance_by_goto(self, page_no: int, prev: ViewState) -> Optional[NavOutcome]:
         """Go to page ``page_no + 1`` by number (go-to-page dialog). None if the dialog
         could not be used, so the caller falls back to key presses."""
         target = page_no + 1
+        use_indicator = not getattr(self.adapter, "page_labels", None)   # labels: indicator shows labels
         for attempt in range(2):
-            if not self._send(self.adapter.open_goto_dialog_and_enter, target):
+            if not self._goto_number(target):
                 event(self.log, "goto_unavailable", f"go-to-page dialog failed for page {target}", level=30)
                 return None
             cur = self.observe()
             changed = self._differs(prev.frame, cur.frame)
+            ind = self._ind(cur.indicator)
             event(self.log, "nav_attempt", page=page_no, attempt=attempt + 1, method="goto", target=target,
-                  changed=changed, level=10, **self.adapter.focus_info())
+                  changed=changed, current=ind.current, level=10, **self.adapter.focus_info())
+            if use_indicator and ind.readable and ind.current != target:
+                continue                                   # landed elsewhere: try again
             if changed:
-                return NavOutcome(NavStatus.ADVANCED, f"went to page {target} by number", attempt + 1,
-                                  self._ind(cur.indicator))
+                return NavOutcome(NavStatus.ADVANCED, f"went to page {target} by number", attempt + 1, ind)
         # The dialog was used twice and the view is unchanged: either two identical pages
         # or the jump did not happen. Accept it, but flag the page for a human to check.
         return NavOutcome(NavStatus.ADVANCED, f"page {target} looks identical to page {page_no}", 2,
                           self._ind(cur.indicator), [Flag.IDENTICAL_PREV, Flag.NAV_RETRY_UNVERIFIED])
 
     # ------------------------------------------------------------------ advance
-    def advance(self, page_no: int, prev: ViewState, known_total: Optional[int]) -> NavOutcome:
-        """Move from ``page_no`` to ``page_no + 1`` and verify the move."""
+    def advance(self, page_no: int, prev: ViewState, known_total: Optional[int],
+                goto_total: Optional[int] = None) -> NavOutcome:
+        """Move from ``page_no`` to ``page_no + 1`` and verify the move. ``goto_total``
+        (any known page count, including the reader's indicator) enables page-number
+        navigation; ``known_total`` additionally makes a stall a failure."""
         retries = self.cfg.capture.nav_retries
-        if self.cfg.viewer.navigate_by == "goto" and known_total is not None and page_no < known_total:
+        goto_total = goto_total if goto_total is not None else known_total
+        if self.cfg.viewer.navigate_by == "goto" and goto_total is not None and page_no < goto_total:
             out = self._advance_by_goto(page_no, prev)
             if out is not None:
                 return out
@@ -167,11 +189,12 @@ class Navigator:
         confirms the page without a readable page number (e.g. by its saved image)."""
         method = self.cfg.viewer.goto_method
         if n == 1:
-            self._send(self.adapter.first_page)
+            if not (method == "dialog" and self._goto_number(1)):
+                self._send(self.adapter.first_page)
             st = self.observe()
             ind = self._ind(st.indicator)
             return (ind.current == 1 if ind.readable else True), st
-        if method == "dialog" and self.adapter.open_goto_dialog_and_enter(n):
+        if method == "dialog" and self._goto_number(n):
             st = self.observe()
         elif method == "page_field" and self.adapter.enter_page_number(n):
             st = self.observe()

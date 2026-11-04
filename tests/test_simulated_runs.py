@@ -322,3 +322,24 @@ def test_goto_navigation_captures_every_page_exactly_once(doc, tmp_path):
     assert code == EXIT_OK and rep["pages_captured"] == 8
     assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
     assert _saved_pages_match(tmp_path / "r", pages) == list(range(1, 9))
+
+
+def test_goto_used_even_when_the_page_box_shows_the_total(doc, tmp_path):
+    """Audit finding: with a readable 'N / M' page box the page count came from the indicator
+    and page-by-number navigation was skipped (arrow keys were used instead)."""
+    pages = [make_page(i) for i in range(1, 9)]
+    cfg = fast_config(doc, viewer={"navigate_by": "goto"})
+    sc = Scenario(pages, indicator=True, goto_dialog=True, double_next_on={3})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["pages_captured"] == 8
+    assert cfg.viewer.keys.next_page not in v.keys_sent                 # no arrow-key page turns
+    assert _saved_pages_match(tmp_path / "r", pages) == list(range(1, 9))
+
+
+def test_goto_dialog_failing_twice_is_retried(doc, tmp_path):
+    pages = [make_page(i) for i in range(1, 6)]
+    cfg = fast_config(doc, viewer={"navigate_by": "goto"})
+    sc = Scenario(pages, indicator=False, goto_dialog=True, goto_fail_times=2, double_next_on={2})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and _saved_pages_match(tmp_path / "r", pages) == list(range(1, 6))
+    assert cfg.viewer.keys.next_page not in v.keys_sent
