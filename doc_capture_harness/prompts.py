@@ -88,15 +88,18 @@ class PromptHandler:
         return next((r for r in self.cfg.rules if r.scope in scopes and rule_matches(r, d)), None)
 
     def handle(self, doc_rect: Optional[Rect], max_rounds: int = 25) -> int:
-        """Process dialogs until none remain that need action. Returns #actions."""
+        """Process dialogs until none remain that need action. Returns the number of
+        dialogs dealt with (including windows that were waited out), 0 if there were none."""
         actions = 0
         rounds = 0
         first_seen: dict[int, float] = {}       # obstruction handle -> when first seen
+        waited = False
         while rounds < max_rounds:
             self.estop.check()
             dialogs = [d for d in self.adapter.list_dialogs(doc_rect) if d.handle not in self.accepted_handles]
             if not dialogs:
-                return actions
+                # A window that was waited out also counts: the view may have changed.
+                return actions + int(waited)
             d = dialogs[0]
             rule = self._rule_for(d)
             if not d.owned_by_viewer and rule is None:
@@ -107,6 +110,7 @@ class PromptHandler:
                     if self.cfg.obstruction_wait_s > 0:
                         self._note(d, "obstruction_wait", None, wait_s=self.cfg.obstruction_wait_s)
                 if time.monotonic() - first_seen[d.handle] < self.cfg.obstruction_wait_s:
+                    waited = True
                     self.estop.sleep(1.0)
                     continue
                 rounds += 1

@@ -261,6 +261,31 @@ class Harness:
         ind = self._indicator()
         return ViewState(res.frame, ind, res.stable)
 
+    def _settle(self) -> bool:
+        """Deal with anything that appeared after a key press (dialogs, other windows over
+        the page, the reader losing focus). True if something had to be dealt with."""
+        intervened = bool(self._dialogs(self._safe_doc_rect()))
+        try:
+            if not self.adapter.is_foreground():
+                event(self.log, "focus_stolen", "another window took the focus; taking it back", level=30,
+                      **self.adapter.focus_info())
+                self.adapter.bring_to_foreground()
+                intervened = True
+        except Exception as exc:  # noqa: BLE001 - best effort
+            event(self.log, "focus_check_failed", str(exc), level=10)
+        return intervened
+
+    def _observe_settled(self) -> ViewState:
+        """Observe the view after an input. If a pop-up or focus change intervened, it is
+        handled first and the view observed again, so a pop-up appearing (or vanishing) is
+        never mistaken for a page turn."""
+        st = self._observe()
+        for _ in range(3):
+            if not self._settle():
+                return st
+            st = self._observe()
+        return st
+
     def _placeholder(self, img: Image.Image) -> Optional[str]:
         pats = self.cfg.capture.placeholder_text_re
         if not pats:
@@ -296,7 +321,7 @@ class Harness:
             raise CaptureBlocked(
                 "The reader window requests exclusion from screen capture (display affinity). "
                 "The harness does not bypass this; use a document/reader configuration that permits capture.")
-        self.navigator = Navigator(self.cfg, self.adapter, self._observe, self.checkpoint)
+        self.navigator = Navigator(self.cfg, self.adapter, self._observe_settled, self.checkpoint)
 
     def _wait_until_loaded(self) -> None:
         t0 = time.monotonic()

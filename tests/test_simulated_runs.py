@@ -269,3 +269,17 @@ def test_resume_of_run_stopped_at_last_page_finishes_and_merges(doc, tmp_path):
     assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
     log = (rd / "logs" / "harness.jsonl").read_text()
     assert "returning to page 11" in log
+
+
+def test_popup_stealing_a_page_turn_is_not_mistaken_for_the_next_page(doc, tmp_path):
+    """Real-Acrobat benchmark: a 'pin to taskbar' prompt took the key press and its
+    appearance was counted as a page turn, losing a page (19 of 20). The pop-up must be
+    waited out and the key retried, so every page is captured."""
+    cfg = fast_config(doc, prompts={"obstruction_wait_s": 10})
+    pop = FakeDialog("Adobe Acrobat", ["Pin Adobe Acrobat to your taskbar?"], ["Pin", "Not now"],
+                     owned=False, ttl=3, draw=True)
+    sc = Scenario([make_page(i) for i in range(1, 7)], indicator=False, popup_on_next={2: pop})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 6, rep["end"]
+    assert rep["end"]["reason"] == EndReason.STALL_CONFIRMED.value
+    assert not any(Flag.DUPLICATE in p["flags"] for p in rep["pages"])

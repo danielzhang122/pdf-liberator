@@ -49,6 +49,8 @@ class FakeDialog:
     buttons: list[str]
     owned: bool = True
     handle: int = 0
+    ttl: int = 0          # >0: closes by itself after this many dialog checks
+    draw: bool = False    # drawn over the viewport (so it changes captured frames)
 
 
 @dataclass
@@ -66,6 +68,8 @@ class Scenario:
     overlays: list = field(default_factory=list)   # reader UI drawn over the page (e.g. "Ask AI Assistant")
     prev_broken: bool = False               # "previous page" key has no effect (seen in Acrobat)
     goto_dialog: bool = False               # supports a go-to-page dialog (Acrobat Ctrl+Shift+N)
+    # page number -> pop-up that appears (and swallows the key) the first time "next" is pressed there
+    popup_on_next: dict = field(default_factory=dict)
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -140,6 +144,12 @@ class FakeViewer(ViewerAdapter):
     # -- dialogs
     def list_dialogs(self, doc_rect):
         out = []
+        for d in list(self.dialogs):
+            if d.ttl > 0:
+                d.ttl -= 1
+                if d.ttl == 0:
+                    self.dialogs.remove(d)
+                    continue
         for d in self.dialogs:
             out.append(DialogInfo(d.handle, d.title, "#32770", 42, Rect(200, 200, 500, 400),
                                   d.texts, d.buttons, d.owned))
@@ -164,6 +174,12 @@ class FakeViewer(ViewerAdapter):
         self.keys_sent.append(keys)
         k = self.cfg.keys
         if keys in (k.next_page, *k.alt_next_page):
+            pop = self.s.popup_on_next.pop(self.page + 1, None)
+            if pop is not None:          # e.g. Acrobat's "pin to taskbar" prompt takes the key
+                self.next_handle += 1
+                pop.handle = self.next_handle
+                self.dialogs.append(pop)
+                return
             left = self.s.stuck_next.get(self.page + 1, 0)
             if left > 0:
                 self.s.stuck_next[self.page + 1] = left - 1
@@ -212,6 +228,14 @@ class FakeViewer(ViewerAdapter):
         return p.resize((int(p.width * scale), int(p.height * scale)), Image.LANCZOS)
 
     def render(self) -> Image.Image:
+        img = self._render_page()
+        vw, vh = self.s.viewport
+        for d in self.dialogs:
+            if d.draw:          # a pop-up window on top of the page
+                ImageDraw.Draw(img).rectangle([vw // 4, vh // 3, vw * 3 // 4, vh * 2 // 3], fill=(120, 120, 140))
+        return img
+
+    def _render_page(self) -> Image.Image:
         vw, vh = self.s.viewport
         img = Image.new("RGB", (vw, vh), CANVAS)
         page = self._scaled_page()
