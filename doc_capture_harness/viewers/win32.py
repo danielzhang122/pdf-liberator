@@ -275,14 +275,7 @@ class Win32ViewerAdapter(ViewerAdapter):
                 break
         event(self.log, "page_count_probe", f"go-to-page dialog: total pages = {total}", level=20,
               texts=dlg.texts, buttons=dlg.buttons)
-        closed = self.click_dialog_button(dlg, "Cancel")
-        if not closed:
-            self.send_dialog_keys(dlg, "{ESC}")
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and pw.is_window(dlg.handle) and pw.is_visible(dlg.handle):
-            self.estop.sleep(0.1)
-        if pw.is_window(dlg.handle) and pw.is_visible(dlg.handle):
-            event(self.log, "page_count_probe", "go-to-page dialog did not close", level=30)
+        self._close_dialog(dlg)
         return total if total and total > 0 else None
 
     def focus_info(self) -> dict:
@@ -663,22 +656,46 @@ class Win32ViewerAdapter(ViewerAdapter):
         if dlg is None:
             return False
         kids = pw.child_windows(dlg.handle)
-        edit = next((h for h, cls, _t, _r in kids if cls == "Edit"), None)
-        ok_btn = next((h for h, cls, t, _r in kids if cls == "Button" and t.replace("&", "").strip().lower() == "ok"),
-                      None)
+        # Acrobat's page box is a rich-edit control (RICHEDIT50W), not a plain Edit.
+        edit = next((h for h, cls, _t, _r in kids if "edit" in cls.lower()), None)
+        ok_btn = self._dialog_button(kids, "ok")
         done = False
         if edit and ok_btn and pw.set_window_text(edit, str(n)):
             done = pw.post_message(ok_btn, 0x00F5)                   # BM_CLICK
-        if not done:
+        else:
+            event(self.log, "goto_dialog_controls", "edit box or OK button not found; typing instead", level=30,
+                  children=[(cls, t) for _h, cls, t, _r in kids][:20])
             done = self.send_dialog_keys(dlg, "^a" + str(n) + "{ENTER}")
-        deadline = time.monotonic() + 4
+        if self._wait_closed(dlg.handle, 4.0):
+            return done
+        # Still open (e.g. the number was rejected): close it and report failure.
+        self._close_dialog(dlg)
+        return False
+
+    @staticmethod
+    def _dialog_button(kids, label: str) -> Optional[int]:
+        return next((h for h, cls, t, _r in kids
+                     if cls == "Button" and t.replace("&", "").strip().lower() == label), None)
+
+    def _wait_closed(self, hwnd: int, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if not pw.is_window(dlg.handle) or not pw.is_visible(dlg.handle):
-                return done
+            if not pw.is_window(hwnd) or not pw.is_visible(hwnd):
+                return True
             self.estop.sleep(0.05)
-        # Still open (e.g. Acrobat rejected the number): close it and report failure.
-        if not self.click_dialog_button(dlg, "Cancel"):
-            self.send_dialog_keys(dlg, "{ESC}")
+        return False
+
+    def _close_dialog(self, dlg: DialogInfo) -> bool:
+        """Close a dialog without relying on keyboard focus: Cancel (BM_CLICK), then WM_CLOSE."""
+        cancel = self._dialog_button(pw.child_windows(dlg.handle), "cancel")
+        if cancel:
+            pw.post_message(cancel, 0x00F5)
+            if self._wait_closed(dlg.handle, 2.0):
+                return True
+        pw.post_message(dlg.handle, 0x0010)                          # WM_CLOSE
+        if self._wait_closed(dlg.handle, 2.0):
+            return True
+        event(self.log, "dialog_close_failed", f"could not close {dlg.title!r}", level=30)
         return False
 
     def enter_page_number(self, n: int) -> bool:

@@ -43,7 +43,7 @@ def notepad(tmp_path):
 
 def _edit_hwnd(pw, hwnd):
     for h, cls, _t, r in pw.child_windows(hwnd):
-        if cls in ("Edit", "RichEditD2DPT") and r.area > 0:
+        if "edit" in cls.lower() and r.area > 0:
             return h
     return None
 
