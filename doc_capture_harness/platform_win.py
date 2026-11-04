@@ -336,6 +336,17 @@ def print_window(hwnd: int, hdc: int, flags: int) -> bool:
     return bool(user32.PrintWindow(hwnd, hdc, flags))
 
 
+_SendMessageTimeoutStr = ctypes.WINFUNCTYPE(
+    wintypes.LPARAM, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR, wintypes.UINT,
+    wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))(("SendMessageTimeoutW", user32))
+
+
+def set_window_text(hwnd: int, text: str, timeout_ms: int = 2000) -> bool:
+    """WM_SETTEXT (works on edit controls of other processes; no keyboard involved)."""
+    result = ctypes.c_size_t()
+    return bool(_SendMessageTimeoutStr(hwnd, 0x000C, 0, text, 0x0002, timeout_ms, ctypes.byref(result)))
+
+
 def message_box(text: str, title: str, flags: int) -> int:
     return int(user32.MessageBoxW(None, text, title, flags))
 

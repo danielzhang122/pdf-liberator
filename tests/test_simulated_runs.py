@@ -156,7 +156,7 @@ def test_emergency_stop_then_resume(doc, tmp_path):
     assert code == EXIT_OK, rep
     assert rep["pages_captured"] == 6 and rep["sessions"] == 2
     log = (rd / "logs" / "harness.jsonl").read_text()
-    assert f'"resuming at page {done + 1}"' in log
+    assert f"returning to page {done} (last captured)" in log
 
 
 def test_resume_refuses_changed_document(doc, tmp_path):
@@ -211,3 +211,114 @@ def test_full_run_with_ocr(doc, tmp_path):
     assert rep["ocr"]["mean_of_page_mean_conf"] > 80
     md = (tmp_path / "r" / "report.md").read_text()
     assert "Per-page detail" in md
+
+
+def test_last_page_known_from_goto_dialog_ends_and_merges(doc, tmp_path):
+    """Field case: 11 pages, no readable page number, Acrobat ignores 'previous page'.
+    The page count comes from the reader's go-to-page dialog, so capture stops exactly
+    after page 11 (no end probe needed) and the merged PDF is built."""
+    from pypdf import PdfReader
+
+    cfg = fast_config(doc, pdf={"enabled": True, "text_layer": False})
+    sc = Scenario([make_page(i) for i in range(1, 12)], indicator=False, prev_broken=True, goto_dialog=True)
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["status"] == "completed" and rep["pages_captured"] == 11
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value and not rep["end_is_uncertain"]
+    assert rep["end"]["detail"] == "viewer_page_count=11"
+    assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
+
+
+def test_unresponsive_navigation_without_page_count_is_never_a_silent_end(doc, tmp_path):
+    """Without any page count, 'keys stopped working' must not be mistaken for the end
+    (the real-Acrobat benchmark saw this mid-document): the document is set aside."""
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 12)], indicator=False, prev_broken=True,
+                  stuck_next={5: 99})
+    h = Harness(cfg, tmp_path / "r", lambda c, e: FakeViewer(sc, cfg.viewer, e, c), lambda a: FakeSource(a),
+                skip_ocr=True)
+    assert h.run() == EXIT_STOPPED
+    rep = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert rep["status"] == "aborted" and rep["pages_captured"] == 5
+    assert "navigation" in rep["end"]["detail"]
+
+
+def test_resume_of_run_stopped_at_last_page_finishes_and_merges(doc, tmp_path):
+    """Exactly the reported state: all 11 pages captured, then the old version stopped with
+    'navigation_failed'. Resuming must go back to page 11, see it is the end, and build the PDF
+    without asking anything (unattended)."""
+    from pypdf import PdfReader
+    from doc_capture_harness.state import Manifest, RunPaths
+
+    pages = [make_page(i) for i in range(1, 12)]
+    rd = tmp_path / "r"
+    cfg = fast_config(doc, pdf={"enabled": True, "text_layer": False}, viewer={"goto_method": "dialog"})
+    run(cfg, Scenario(pages, indicator=False), rd)
+    m = Manifest.load(RunPaths(rd))
+    m.data.update(status="aborted", status_capture=None,
+                  end={"reason": "user_abort", "detail": "needs attention (navigation_failed): ...", "last_page": 11})
+    m.data.pop("pdf", None)
+    m.save(include_pages=True)
+    for f in (rd / "output").glob("*.pdf"):
+        f.unlink()
+
+    sc = Scenario(pages, indicator=False, prev_broken=True, goto_dialog=True)
+    code, h, rep, v = run(cfg, sc, rd, resume=True)          # any checkpoint fails the test
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
+    assert rep["status"] == "completed" and rep["pages_captured"] == 11
+    assert v.page == 10                                       # went straight to page 11 (0-based 10)
+    assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
+    log = (rd / "logs" / "harness.jsonl").read_text()
+    assert "returning to page 11" in log
+
+
+def test_popup_stealing_a_page_turn_is_not_mistaken_for_the_next_page(doc, tmp_path):
+    """Real-Acrobat benchmark: a 'pin to taskbar' prompt took the key press and its
+    appearance was counted as a page turn, losing a page (19 of 20). The pop-up must be
+    waited out and the key retried, so every page is captured."""
+    cfg = fast_config(doc, prompts={"obstruction_wait_s": 10})
+    pop = FakeDialog("Adobe Acrobat", ["Pin Adobe Acrobat to your taskbar?"], ["Pin", "Not now"],
+                     owned=False, ttl=3, draw=True)
+    sc = Scenario([make_page(i) for i in range(1, 7)], indicator=False, popup_on_next={2: pop})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert rep["pages_captured"] == 6, rep["end"]
+    assert rep["end"]["reason"] == EndReason.STALL_CONFIRMED.value
+    assert not any(Flag.DUPLICATE in p["flags"] for p in rep["pages"])
+
+
+def _saved_pages_match(rd, pages):
+    """Each saved page image is the expected document page (by image hash)."""
+    from PIL import Image
+    from doc_capture_harness.imaging import dhash, hamming
+    from doc_capture_harness.state import Manifest, RunPaths
+    m = Manifest.load(RunPaths(rd))
+    out = []
+    for n in m.captured_pages():
+        img = Image.open(rd / m.page(n)["image"])
+        best = min(range(len(pages)), key=lambda i: hamming(dhash(img), dhash(pages[i].resize(img.size))))
+        out.append(best + 1)
+    return out
+
+
+def test_delayed_key_moving_two_pages_loses_a_page_with_keys(doc, tmp_path):
+    """Real-Acrobat benchmark: while another window held the focus, a delayed key press was
+    applied late and Acrobat moved two pages. With key navigation that silently skips a page."""
+    pages = [make_page(i) for i in range(1, 9)]
+    cfg = fast_config(doc, viewer={"navigate_by": "keys"})
+    run(cfg, Scenario(pages, indicator=False, goto_dialog=True, double_next_on={3}), tmp_path / "r",
+        responder=lambda r, m: "skip")
+    assert 4 not in _saved_pages_match(tmp_path / "r", pages)          # page 4 was skipped
+
+
+def test_goto_navigation_captures_every_page_exactly_once(doc, tmp_path):
+    """Navigating by page number through the go-to-page dialog is immune to lost, delayed or
+    doubled key presses and to pop-ups: every page is captured once, in order."""
+    pages = [make_page(i) for i in range(1, 9)]
+    cfg = fast_config(doc, viewer={"navigate_by": "goto"}, prompts={"obstruction_wait_s": 10})
+    pop = FakeDialog("Adobe Acrobat", ["Pin Adobe Acrobat to your taskbar?"], ["Pin", "Not now"],
+                     owned=False, ttl=3, draw=True)
+    sc = Scenario(pages, indicator=False, goto_dialog=True, prev_broken=True, double_next_on={3},
+                  stuck_next={5: 99}, popup_on_next={2: pop})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["pages_captured"] == 8
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
+    assert _saved_pages_match(tmp_path / "r", pages) == list(range(1, 9))

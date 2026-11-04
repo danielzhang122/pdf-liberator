@@ -254,6 +254,30 @@ class Win32ViewerAdapter(ViewerAdapter):
     def screen_layout(self, rect: Rect):
         return pw.virtual_screen(), pw.monitors_for_rect(rect)
 
+    def page_count_hint(self) -> Optional[int]:
+        """Open the go-to-page dialog, read "of N" from it, and cancel it."""
+        if not self.cfg.keys.goto_page or not self.cfg.goto_dialog_title_re:
+            return None
+        try:
+            self.send_keys(self.cfg.keys.goto_page)
+        except Exception as exc:
+            event(self.log, "page_count_probe", f"could not open the go-to-page dialog: {exc}", level=30)
+            return None
+        dlg = self._wait_goto_dialog()
+        if dlg is None:
+            event(self.log, "page_count_probe", "go-to-page dialog did not appear", level=30)
+            return None
+        total = None
+        for t in dlg.texts + dlg.buttons:
+            m = re.search(r"(?i)\bof\s+(\d+)", t) or re.search(r"/\s*(\d+)\s*\)?\s*$", t)
+            if m:
+                total = int(m.group(1))
+                break
+        event(self.log, "page_count_probe", f"go-to-page dialog: total pages = {total}", level=20,
+              texts=dlg.texts, buttons=dlg.buttons)
+        self._close_dialog(dlg)
+        return total if total and total > 0 else None
+
     def focus_info(self) -> dict:
         info: dict = {}
         try:
@@ -611,25 +635,67 @@ class Win32ViewerAdapter(ViewerAdapter):
         self.inputs.scroll(x, y, notches)
         self.park_cursor()
 
+    def _wait_goto_dialog(self, timeout_s: float = 4.0) -> Optional[DialogInfo]:
+        title_re = re.compile(self.cfg.goto_dialog_title_re)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            dlg = next((d for d in self.list_dialogs(None) if d.owned_by_viewer and title_re.search(d.title)), None)
+            if dlg is not None:
+                return dlg
+            self.estop.sleep(0.08)
+        return None
+
     def open_goto_dialog_and_enter(self, n: int) -> bool:
+        """Go to page ``n``: open the go-to-page dialog (one shortcut), put the number into
+        its edit box with WM_SETTEXT and press OK with BM_CLICK - no further key presses,
+        so lost, delayed or misdirected keystrokes cannot change the page."""
         if not self.cfg.keys.goto_page or not self.cfg.goto_dialog_title_re:
             return False
-        title_re = re.compile(self.cfg.goto_dialog_title_re)
         self.send_keys(self.cfg.keys.goto_page)
-        deadline = time.monotonic() + 5
-        dlg = None
-        while time.monotonic() < deadline and dlg is None:
-            self.estop.sleep(0.15)
-            dlg = next((d for d in self.list_dialogs(None) if d.owned_by_viewer and title_re.search(d.title)), None)
+        dlg = self._wait_goto_dialog()
         if dlg is None:
             return False
-        if not self.send_dialog_keys(dlg, "^a" + str(n) + "{ENTER}"):
-            return False
-        deadline = time.monotonic() + 5
+        kids = pw.child_windows(dlg.handle)
+        # Acrobat's page box is a rich-edit control (RICHEDIT50W), not a plain Edit.
+        edit = next((h for h, cls, _t, _r in kids if "edit" in cls.lower()), None)
+        ok_btn = self._dialog_button(kids, "ok")
+        done = False
+        if edit and ok_btn and pw.set_window_text(edit, str(n)):
+            done = pw.post_message(ok_btn, 0x00F5)                   # BM_CLICK
+        else:
+            event(self.log, "goto_dialog_controls", "edit box or OK button not found; typing instead", level=30,
+                  children=[(cls, t) for _h, cls, t, _r in kids][:20])
+            done = self.send_dialog_keys(dlg, "^a" + str(n) + "{ENTER}")
+        if self._wait_closed(dlg.handle, 4.0):
+            return done
+        # Still open (e.g. the number was rejected): close it and report failure.
+        self._close_dialog(dlg)
+        return False
+
+    @staticmethod
+    def _dialog_button(kids, label: str) -> Optional[int]:
+        return next((h for h, cls, t, _r in kids
+                     if cls == "Button" and t.replace("&", "").strip().lower() == label), None)
+
+    def _wait_closed(self, hwnd: int, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            self.estop.sleep(0.15)
-            if not pw.is_window(dlg.handle) or not pw.is_visible(dlg.handle):
+            if not pw.is_window(hwnd) or not pw.is_visible(hwnd):
                 return True
+            self.estop.sleep(0.05)
+        return False
+
+    def _close_dialog(self, dlg: DialogInfo) -> bool:
+        """Close a dialog without relying on keyboard focus: Cancel (BM_CLICK), then WM_CLOSE."""
+        cancel = self._dialog_button(pw.child_windows(dlg.handle), "cancel")
+        if cancel:
+            pw.post_message(cancel, 0x00F5)
+            if self._wait_closed(dlg.handle, 2.0):
+                return True
+        pw.post_message(dlg.handle, 0x0010)                          # WM_CLOSE
+        if self._wait_closed(dlg.handle, 2.0):
+            return True
+        event(self.log, "dialog_close_failed", f"could not close {dlg.title!r}", level=30)
         return False
 
     def enter_page_number(self, n: int) -> bool:

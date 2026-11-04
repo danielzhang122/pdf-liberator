@@ -28,6 +28,14 @@ _ACROBAT_TOOLBARS = {
     "title_re": r"^$",
     "action": "ignore",
 }
+# A go-to-page dialog left open (the harness uses it to move between pages).
+_ACROBAT_STRAY_GOTO = {
+    "name": "acrobat-stray-go-to-page-dialog",
+    "title_re": r"^Go To Page$",
+    "action": "click",
+    "button": "Cancel",
+    "max_times": 20,
+}
 _JS_MANUAL = {
     "name": "javascript-prompt-requires-operator",
     "text_re": r"(?i)javascript",
@@ -63,6 +71,7 @@ PROFILES: dict[str, dict] = {
         "prepare_keys": ["^0"],            # Ctrl+0: zoom to page level (fit page)
         "goto_method": "dialog",
         "goto_dialog_title_re": r"(?i)go to page",
+        "navigate_by": "goto",          # page N via Ctrl+Shift+N, not arrow keys
         "overlay_names": ["Ask AI Assistant"],   # label of the AI Assistant bar
         # Page layout has no default shortcut, so it is a manual step.
         "setup_checkpoint": (
@@ -71,7 +80,7 @@ PROFILES: dict[str, dict] = {
             "that cover the page (they stay closed). Make sure no other Acrobat window "
             "covers the screen."
         ),
-        "_prompt_rules": [_ACROBAT_TOOLBARS, _JS_MANUAL, _SAVE_CHANGES_NO],
+        "_prompt_rules": [_ACROBAT_TOOLBARS, _ACROBAT_STRAY_GOTO, _JS_MANUAL, _SAVE_CHANGES_NO],
     },
     "pdfxchange": {
         "executable_candidates": [

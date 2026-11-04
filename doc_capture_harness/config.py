@@ -92,6 +92,10 @@ class ViewerConfig:
     keys: ViewerKeys = field(default_factory=ViewerKeys)
     prepare_keys: list[str] = field(default_factory=list)  # e.g. fit-page zoom
     goto_method: str = "sequential"              # dialog | page_field | sequential | manual
+    # How to move to the next page when the page count is known: "goto" enters the page
+    # number in the go-to-page dialog (immune to lost, delayed or doubled key presses);
+    # "keys" presses keys.next_page. Without a known page count, keys are always used.
+    navigate_by: str = "keys"
     goto_dialog_title_re: Optional[str] = None
     page_indicator: IndicatorConfig = field(default_factory=IndicatorConfig)
     busy: BusyConfig = field(default_factory=BusyConfig)
@@ -408,6 +412,7 @@ def validate(cfg: HarnessConfig) -> None:
     check(cfg.capture.mode in ("fit_page", "scroll"), "capture.mode must be fit_page or scroll")
     check(cfg.capture.method in ("screen", "printwindow"), "capture.method must be screen or printwindow")
     check(cfg.capture.scroll.method in ("wheel", "keys"), "capture.scroll.method must be wheel or keys")
+    check(cfg.viewer.navigate_by in ("keys", "goto"), "viewer.navigate_by must be keys or goto")
     check(cfg.viewer.goto_method in ("dialog", "page_field", "sequential", "manual"),
           "viewer.goto_method must be dialog, page_field, sequential or manual")
     check(cfg.prompts.unknown_action in ("manual", "abort"),

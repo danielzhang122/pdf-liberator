@@ -86,6 +86,7 @@ class Harness:
         self._first_checkpoint_done = False
         self._timers: dict[str, float] = collections.defaultdict(float)
         self._page_region = None
+        self._page_count_hint: Optional[int] = None
         self._placeholder_ocr_ok: Optional[bool] = None
 
     # ================================================================== helpers
@@ -260,6 +261,31 @@ class Harness:
         ind = self._indicator()
         return ViewState(res.frame, ind, res.stable)
 
+    def _settle(self) -> bool:
+        """Deal with anything that appeared after a key press (dialogs, other windows over
+        the page, the reader losing focus). True if something had to be dealt with."""
+        intervened = bool(self._dialogs(self._safe_doc_rect()))
+        try:
+            if not self.adapter.is_foreground():
+                event(self.log, "focus_stolen", "another window took the focus; taking it back", level=30,
+                      **self.adapter.focus_info())
+                self.adapter.bring_to_foreground()
+                intervened = True
+        except Exception as exc:  # noqa: BLE001 - best effort
+            event(self.log, "focus_check_failed", str(exc), level=10)
+        return intervened
+
+    def _observe_settled(self) -> ViewState:
+        """Observe the view after an input. If a pop-up or focus change intervened, it is
+        handled first and the view observed again, so a pop-up appearing (or vanishing) is
+        never mistaken for a page turn."""
+        st = self._observe()
+        for _ in range(3):
+            if not self._settle():
+                return st
+            st = self._observe()
+        return st
+
     def _placeholder(self, img: Image.Image) -> Optional[str]:
         pats = self.cfg.capture.placeholder_text_re
         if not pats:
@@ -295,7 +321,7 @@ class Harness:
             raise CaptureBlocked(
                 "The reader window requests exclusion from screen capture (display affinity). "
                 "The harness does not bypass this; use a document/reader configuration that permits capture.")
-        self.navigator = Navigator(self.cfg, self.adapter, self._observe, self.checkpoint)
+        self.navigator = Navigator(self.cfg, self.adapter, self._observe_settled, self.checkpoint)
 
     def _wait_until_loaded(self) -> None:
         t0 = time.monotonic()
@@ -539,6 +565,8 @@ class Harness:
             return known, "known_page_count"
         if ind.total is not None and self.navigator.indicator_trusted:
             return ind.total, "viewer_indicator"
+        if self._page_count_hint:
+            return self._page_count_hint, "viewer_page_count"
         return None, "unknown"
 
     def _end(self, reason: EndReason, detail: str, last_page: int) -> None:
@@ -644,13 +672,13 @@ class Harness:
         max_pages = self.cfg.document.max_pages
         total, total_src = self._known_total(state.indicator)
         if total is not None and page >= total:
-            self._end(EndReason.KNOWN_PAGE_COUNT if total_src == "known_page_count" else EndReason.INDICATOR_TOTAL,
+            self._end(EndReason.INDICATOR_TOTAL if total_src == "viewer_indicator" else EndReason.KNOWN_PAGE_COUNT,
                       f"{total_src}={total}", page)
             return None
         if page >= max_pages:
             self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page)
             return None
-        outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+        outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
         nav_flags = list(outcome.flags)
         while outcome.status == NavStatus.FAILED:
             self.save_diagnostics(f"page{page:04d}_nav_failed")
@@ -675,7 +703,7 @@ class Harness:
                     (not ind.readable and self.navigator._differs(state.frame, cur.frame)):
                 nav_flags = [Flag.MANUAL_OVERRIDE]
                 break
-            outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+            outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
             nav_flags = list(outcome.flags)
         if outcome.status == NavStatus.END:
             self._end(outcome.end_reason or EndReason.STALL_UNCONFIRMED, outcome.reason, page)
@@ -793,6 +821,11 @@ class Harness:
                 self._with_focus(self.adapter.prepare_view)
                 self._wait_until_loaded()
                 self._check_layout()
+                if self.cfg.document.known_page_count is None:
+                    self._page_count_hint = self._with_focus(self.adapter.page_count_hint)
+                    if self._page_count_hint:
+                        event(self.log, "page_count", f"the reader reports {self._page_count_hint} page(s); "
+                              "capture stops after the last one")
                 env = self.adapter.environment_info()
                 env["dpi_awareness_requested"] = os.environ.get("DOC_CAPTURE_DPI_MODE", "")
                 self.manifest.data["environment"] = env

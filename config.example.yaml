@@ -29,6 +29,8 @@ viewer:
   #   next_page: '{RIGHT}'
   #   prev_page: '{LEFT}'
   #   alt_next_page: ['{PGDN}']
+  # navigate_by: goto   # goto | keys
+  #   goto = next page by number via the Go To Page dialog (acrobat default; used when the page count is known), keys = press keys.next_page
   prepare_keys: ['^0']       # Acrobat Ctrl+0 = zoom to page level
   # setup_checkpoint: manual step shown once after opening (the acrobat and
   # pdfxchange profiles ask you to switch to Single Page view). Set null to skip.
@@ -51,7 +53,7 @@ capture:
     pixel_threshold: 10
     changed_fraction_threshold: 0.0008
     min_wait_s: 0.3
-    timeout_s: 20
+    timeout_s: 10
   scroll:
     method: wheel            # wheel | keys (uses viewer.keys.scroll_down)
     wheel_notches: 5
@@ -60,7 +62,7 @@ capture:
     auto_page: true
     canvas_tolerance: 14
     padding: 4
-  retries: 3                 # capture attempts beyond the first
+  retries: 2                 # capture attempts beyond the first
   nav_retries: 2             # next-page attempts beyond the first (alt keys used on retries)
   same_page_threshold: 0.0015
   # Text the wrapper shows while it is not ready; checked with a quick OCR pass.

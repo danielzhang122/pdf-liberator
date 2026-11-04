@@ -111,7 +111,7 @@ def test_batch_stop_file_halts_whole_batch(tmp_path):
     code = Batch(raw, discover([str(folder)], exclude=out), out, f, echo=lambda m: None).run()
     assert code == EXIT_OK and f.launched == ["a.pdf", "a.pdf", "b.pdf"]
     log = (out / "_runs").glob("a_*/logs/harness.jsonl")
-    assert "resuming at page" in next(log).read_text()
+    assert "resuming: returning to page" in next(log).read_text()
 
 
 def test_discover_csv_and_name_collisions(tmp_path):
