@@ -70,6 +70,8 @@ class Scenario:
     goto_dialog: bool = False               # supports a go-to-page dialog (Acrobat Ctrl+Shift+N)
     # page number -> pop-up that appears (and swallows the key) the first time "next" is pressed there
     popup_on_next: dict = field(default_factory=dict)
+    # pages where one "next" key press moves two pages (a delayed key press applied late)
+    double_next_on: set = field(default_factory=set)
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -179,6 +181,12 @@ class FakeViewer(ViewerAdapter):
                 self.next_handle += 1
                 pop.handle = self.next_handle
                 self.dialogs.append(pop)
+                return
+            if self.page + 1 in self.s.double_next_on:
+                self.s.double_next_on.discard(self.page + 1)
+                self.page = min(self.page + 2, len(self.s.pages) - 1)
+                self.scroll = 0
+                self._show()
                 return
             left = self.s.stuck_next.get(self.page + 1, 0)
             if left > 0:

@@ -63,6 +63,7 @@ PROFILES: dict[str, dict] = {
         "prepare_keys": ["^0"],            # Ctrl+0: zoom to page level (fit page)
         "goto_method": "dialog",
         "goto_dialog_title_re": r"(?i)go to page",
+        "navigate_by": "goto",          # page N via Ctrl+Shift+N, not arrow keys
         "overlay_names": ["Ask AI Assistant"],   # label of the AI Assistant bar
         # Page layout has no default shortcut, so it is a manual step.
         "setup_checkpoint": (

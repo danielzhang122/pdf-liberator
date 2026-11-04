@@ -283,3 +283,42 @@ def test_popup_stealing_a_page_turn_is_not_mistaken_for_the_next_page(doc, tmp_p
     assert rep["pages_captured"] == 6, rep["end"]
     assert rep["end"]["reason"] == EndReason.STALL_CONFIRMED.value
     assert not any(Flag.DUPLICATE in p["flags"] for p in rep["pages"])
+
+
+def _saved_pages_match(rd, pages):
+    """Each saved page image is the expected document page (by image hash)."""
+    from PIL import Image
+    from doc_capture_harness.imaging import dhash, hamming
+    from doc_capture_harness.state import Manifest, RunPaths
+    m = Manifest.load(RunPaths(rd))
+    out = []
+    for n in m.captured_pages():
+        img = Image.open(rd / m.page(n)["image"])
+        best = min(range(len(pages)), key=lambda i: hamming(dhash(img), dhash(pages[i].resize(img.size))))
+        out.append(best + 1)
+    return out
+
+
+def test_delayed_key_moving_two_pages_loses_a_page_with_keys(doc, tmp_path):
+    """Real-Acrobat benchmark: while another window held the focus, a delayed key press was
+    applied late and Acrobat moved two pages. With key navigation that silently skips a page."""
+    pages = [make_page(i) for i in range(1, 9)]
+    cfg = fast_config(doc, viewer={"navigate_by": "keys"})
+    run(cfg, Scenario(pages, indicator=False, goto_dialog=True, double_next_on={3}), tmp_path / "r",
+        responder=lambda r, m: "skip")
+    assert 4 not in _saved_pages_match(tmp_path / "r", pages)          # page 4 was skipped
+
+
+def test_goto_navigation_captures_every_page_exactly_once(doc, tmp_path):
+    """Navigating by page number through the go-to-page dialog is immune to lost, delayed or
+    doubled key presses and to pop-ups: every page is captured once, in order."""
+    pages = [make_page(i) for i in range(1, 9)]
+    cfg = fast_config(doc, viewer={"navigate_by": "goto"}, prompts={"obstruction_wait_s": 10})
+    pop = FakeDialog("Adobe Acrobat", ["Pin Adobe Acrobat to your taskbar?"], ["Pin", "Not now"],
+                     owned=False, ttl=3, draw=True)
+    sc = Scenario(pages, indicator=False, goto_dialog=True, prev_broken=True, double_next_on={3},
+                  stuck_next={5: 99}, popup_on_next={2: pop})
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["pages_captured"] == 8
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
+    assert _saved_pages_match(tmp_path / "r", pages) == list(range(1, 9))

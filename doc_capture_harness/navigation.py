@@ -57,18 +57,42 @@ class Navigator:
     def _ind(self, ind: PageIndicator) -> PageIndicator:
         return ind if self.indicator_trusted else PageIndicator(raw=ind.raw, source="untrusted")
 
-    def _send(self, fn, *args) -> None:
+    def _send(self, fn, *args):
         try:
-            fn(*args)
+            return fn(*args)
         except FocusLost as exc:
             self.checkpoint("focus_lost", f"{exc}. Click the reader window (without changing the page) "
                                           "and choose Retry.")
-            fn(*args)
+            return fn(*args)
+
+    def _advance_by_goto(self, page_no: int, prev: ViewState) -> Optional[NavOutcome]:
+        """Go to page ``page_no + 1`` by number (go-to-page dialog). None if the dialog
+        could not be used, so the caller falls back to key presses."""
+        target = page_no + 1
+        for attempt in range(2):
+            if not self._send(self.adapter.open_goto_dialog_and_enter, target):
+                event(self.log, "goto_unavailable", f"go-to-page dialog failed for page {target}", level=30)
+                return None
+            cur = self.observe()
+            changed = self._differs(prev.frame, cur.frame)
+            event(self.log, "nav_attempt", page=page_no, attempt=attempt + 1, method="goto", target=target,
+                  changed=changed, level=10, **self.adapter.focus_info())
+            if changed:
+                return NavOutcome(NavStatus.ADVANCED, f"went to page {target} by number", attempt + 1,
+                                  self._ind(cur.indicator))
+        # The dialog was used twice and the view is unchanged: either two identical pages
+        # or the jump did not happen. Accept it, but flag the page for a human to check.
+        return NavOutcome(NavStatus.ADVANCED, f"page {target} looks identical to page {page_no}", 2,
+                          self._ind(cur.indicator), [Flag.IDENTICAL_PREV, Flag.NAV_RETRY_UNVERIFIED])
 
     # ------------------------------------------------------------------ advance
     def advance(self, page_no: int, prev: ViewState, known_total: Optional[int]) -> NavOutcome:
         """Move from ``page_no`` to ``page_no + 1`` and verify the move."""
         retries = self.cfg.capture.nav_retries
+        if self.cfg.viewer.navigate_by == "goto" and known_total is not None and page_no < known_total:
+            out = self._advance_by_goto(page_no, prev)
+            if out is not None:
+                return out
         prev_ind = self._ind(prev.indicator)
         last: Optional[ViewState] = None
         for attempt in range(retries + 1):

@@ -85,3 +85,15 @@ def test_window_description_is_cached(notepad, monkeypatch):
     monkeypatch.setattr(pw, "child_windows", lambda *a, **k: (_ for _ in ()).throw(AssertionError("enumerated")))
     d2 = notepad._describe(w, True)
     assert (d2.texts, d2.buttons) == (d1.texts, d1.buttons)
+
+
+def test_set_window_text_into_another_process(notepad):
+    """WM_SETTEXT prototype used to fill Acrobat's go-to-page box without key presses."""
+    from doc_capture_harness import platform_win as pw
+
+    edit = _edit_hwnd(pw, notepad.hwnd)
+    if edit is None:
+        pytest.skip("this Notepad has no Win32 edit control")
+    assert pw.set_window_text(edit, "Page 7 of 12")
+    notepad._indicator_cache.reset()
+    assert notepad.read_page_indicator().current == 7
