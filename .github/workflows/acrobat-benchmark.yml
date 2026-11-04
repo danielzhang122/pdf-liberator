@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       pages:
-        description: "Pages in the generated test PDF"
-        default: "20"
+        description: "Pages per generated test PDF, comma-separated"
+        default: "20,11"
 
 jobs:
   bench:
@@ -65,7 +65,7 @@ jobs:
 
       - name: Benchmark (real Acrobat Reader)
         shell: cmd
-        run: .venv\Scripts\python.exe tools\acrobat_benchmark.py "%RUNNER_TEMP%\bench" --pages ${{ github.event.inputs.pages || '20' }} --harness-dir "${{ steps.h.outputs.dir }}"
+        run: .venv\Scripts\python.exe tools\acrobat_benchmark.py "%RUNNER_TEMP%\bench" --pages ${{ github.event.inputs.pages || '20,11' }} --harness-dir "${{ steps.h.outputs.dir }}"
 
       - name: Upload run folder
         if: always()

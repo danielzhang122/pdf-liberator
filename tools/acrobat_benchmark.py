@@ -10,6 +10,7 @@ time per page exceeds --limit or the document was not captured completely.
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 import time
@@ -54,7 +55,7 @@ def parse_ts(s: str) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("outdir")
-    ap.add_argument("--pages", type=int, default=20)
+    ap.add_argument("--pages", default="20", help="pages per generated document, comma-separated (e.g. 20,11)")
     ap.add_argument("--harness-dir", default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--limit", type=float, default=10.0)
     ap.add_argument("--timeout-min", type=float, default=45)
@@ -62,11 +63,15 @@ def main() -> int:
     out = Path(a.outdir).resolve()
     docs = out / "docs"
     docs.mkdir(parents=True, exist_ok=True)
-    pdf = docs / "benchmark.pdf"
-    make_pdf(pdf, a.pages)
+    sizes = [int(x) for x in str(a.pages).split(",") if x.strip()]
+    expected = {}
+    for i, n in enumerate(sizes):
+        name = f"bench{i + 1}_{n}p"
+        make_pdf(docs / f"{name}.pdf", n)
+        expected[name] = n
     results = out / "results"
     cmd = [sys.executable, "-m", "doc_capture_harness", "batch", str(docs), "--out", str(results),
-           "--no-prompt", "--max-pages", str(a.pages + 5)]
+           "--no-prompt", "--max-pages", str(max(sizes) + 5)]
     print("running:", " ".join(cmd), "in", a.harness_dir, flush=True)
     t0 = time.monotonic()
     try:
@@ -75,18 +80,37 @@ def main() -> int:
         rc = "timeout"
     wall = time.monotonic() - t0
 
-    logs = list((results / "_runs").glob("*/logs/harness.jsonl"))
-    events = [json.loads(line) for f in logs for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
+    all_ok = True
+    summaries = {}
+    for run in sorted((results / "_runs").glob("*")):
+        if not (run / "logs" / "harness.jsonl").exists():
+            continue
+        name = next((k for k in expected if run.name.startswith(k)), run.name)
+        ok, summary = report_run(run, expected.get(name), a.limit)
+        summaries[name] = summary
+        all_ok = all_ok and ok
+    missing = [k for k in expected if k not in summaries]
+    if missing:
+        print("documents not processed:", missing)
+        all_ok = False
+    (out / "benchmark.json").write_text(json.dumps({"exit_code": rc, "wall_s": round(wall, 1),
+                                                     "documents": summaries}, indent=2), encoding="utf-8")
+    print("RESULT:", "PASS" if all_ok else "FAIL")
+    return 0 if all_ok else 1
+
+
+def report_run(run: Path, pages_expected, limit: float):
+    events = [json.loads(line) for line in (run / "logs" / "harness.jsonl").read_text(encoding="utf-8").splitlines()
+              if line.strip()]
     prog = [e for e in events if e.get("event") == "progress"]
     start = next((e for e in events if e.get("event") in ("layout", "document_loaded")), None)
     times = [parse_ts(e["ts"]) for e in prog]
     per_page = [round(b - a_, 2) for a_, b in zip(times, times[1:])]
     if times and start:
         per_page.insert(0, round(times[0] - parse_ts(start["ts"]), 2))
-    report = {}
-    for f in (results / "_runs").glob("*/report.json"):
-        report = json.loads(f.read_text(encoding="utf-8"))
-    print("\n=== per-page progress lines ===")
+    report = json.loads((run / "report.json").read_text(encoding="utf-8")) if (run / "report.json").exists() else {}
+    print(f"\n################ {run.name} ################")
+    print("=== per-page progress lines ===")
     for e in prog:
         print(e["ts"], e["msg"])
     print("\n=== problems logged ===")
@@ -94,26 +118,43 @@ def main() -> int:
         if e.get("level") in ("WARNING", "ERROR"):
             print(e["ts"], e.get("event"), e.get("msg"), {k: v for k, v in e.items()
                                                            if k not in ("ts", "level", "event", "msg")})
-    print("\n=== navigation attempts (key presses and what had focus) ===")
+    print("\n=== navigation attempts ===")
     for e in events:
-        if e.get("event") in ("nav_attempt", "end_of_document", "resume_position"):
+        if e.get("event") in ("nav_attempt", "end_of_document", "resume_position", "page_count_probe",
+                              "goto_unavailable", "goto_dialog_controls", "focus_stolen"):
             print(e["ts"], json.dumps({k: v for k, v in e.items() if k not in ("ts", "level")}, default=str))
     print("\n=== diagnostics ===")
-    for f in sorted((results / "_runs").glob("*/diagnostics/*.json")):
-        print(f.name, f.read_text(encoding="utf-8")[:3000])
+    for f in sorted((run / "diagnostics").glob("*.json")):
+        print(f.name, f.read_text(encoding="utf-8")[:2500])
     avg = sum(per_page) / len(per_page) if per_page else None
-    summary = {"exit_code": rc, "wall_s": round(wall, 1), "pages_expected": a.pages,
-               "pages_captured": report.get("pages_captured"), "status": report.get("status"),
-               "end": (report.get("end") or {}).get("reason"),
+    pages_ok = verify_pages(run, pages_expected)
+    summary = {"pages_expected": pages_expected, "pages_captured": report.get("pages_captured"),
+               "pages_in_order": pages_ok, "status": report.get("status"),
+               "end": (report.get("end") or {}).get("reason"), "end_detail": (report.get("end") or {}).get("detail"),
                "seconds_per_page": per_page, "avg_s_per_page": round(avg, 2) if avg else None,
                "max_s_per_page": max(per_page) if per_page else None,
                "capture_breakdown_s": (report.get("timings") or {}).get("capture_breakdown_s")}
-    (out / "benchmark.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("\n=== summary ===\n" + json.dumps(summary, indent=2))
-    ok = (avg is not None and avg <= a.limit and report.get("pages_captured") == a.pages
-          and report.get("status") == "completed")
-    print("RESULT:", "PASS" if ok else "FAIL")
-    return 0 if ok else 1
+    ok = (avg is not None and avg <= limit and report.get("pages_captured") == pages_expected
+          and report.get("status") == "completed" and pages_ok)
+    return ok, summary
+
+
+def verify_pages(run: Path, pages_expected) -> bool:
+    """OCR text of saved page N must say 'Benchmark page N' (no skipped/duplicated pages)."""
+    ocr = run / "ocr"
+    if not pages_expected:
+        return False
+    bad = []
+    for n in range(1, pages_expected + 1):
+        f = ocr / f"page_{n:04d}.txt"
+        text = f.read_text(encoding="utf-8") if f.exists() else ""
+        m = re.search(r"benchmark\s+page\s+(\d+)", text, re.I)
+        if not m or int(m.group(1)) != n:
+            bad.append(n)
+    if bad:
+        print("pages whose OCR does not show the expected page number:", bad)
+    return not bad
 
 
 if __name__ == "__main__":
