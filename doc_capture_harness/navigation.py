@@ -194,8 +194,10 @@ class Navigator:
             st = self.observe()
             ind = self._ind(st.indicator)
             return (ind.current == 1 if ind.readable else True), st
+        jumped = False
         if method == "dialog" and self._goto_number(n):
             st = self.observe()
+            jumped = True
         elif method == "page_field" and self.adapter.enter_page_number(n):
             st = self.observe()
         elif method == "manual":
@@ -217,6 +219,11 @@ class Navigator:
         if ind.readable:
             return ind.current == n, st
         if verify is not None and verify(st):
+            return True, st
+        if jumped:
+            # The go-to-page dialog accepted the number and closed: the reader is on page n.
+            # (An image check can fail when the saved page came from an older version.)
+            event(self.log, "goto_trusted", f"on page {n} by number (image check not conclusive)", level=30)
             return True, st
         # Cannot verify without an indicator.
         ans = self.checkpoint("verify_page",

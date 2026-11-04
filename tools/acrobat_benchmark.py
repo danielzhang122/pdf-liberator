@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-def make_pdf(path: Path, pages: int) -> None:
+def make_pdf(path: Path, pages: int, secured: bool = False) -> None:
     from PIL import Image, ImageDraw, ImageFont
     from pypdf import PdfReader, PdfWriter
     from pypdf.generic import ArrayObject, NameObject
@@ -43,6 +43,11 @@ def make_pdf(path: Path, pages: int) -> None:
     w = PdfWriter(clone_from=PdfReader(str(tmp)))
     w._root_object[NameObject("/PageLayout")] = NameObject("/SinglePage")
     w._root_object[NameObject("/OpenAction")] = ArrayObject([w.pages[0].indirect_reference, NameObject("/Fit")])
+    if secured:
+        # Opens without a password but is encrypted with copy/print/edit restrictions,
+        # so Acrobat shows "(SECURED)" in the title bar, like the user's documents.
+        w.encrypt(user_password="", owner_password="bench-owner-" + path.stem, permissions_flag=0,
+                  algorithm="AES-256")
     with open(path, "wb") as f:
         w.write(f)
     tmp.unlink()
@@ -58,6 +63,7 @@ def main() -> int:
     ap.add_argument("--pages", default="20", help="pages per generated document, comma-separated (e.g. 20,11)")
     ap.add_argument("--harness-dir", default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--limit", type=float, default=10.0)
+    ap.add_argument("--secured", action="store_true", help="encrypt the PDFs (owner password, restrictions)")
     ap.add_argument("--timeout-min", type=float, default=45)
     a = ap.parse_args()
     out = Path(a.outdir).resolve()
@@ -67,7 +73,7 @@ def main() -> int:
     expected = {}
     for i, n in enumerate(sizes):
         name = f"bench{i + 1}_{n}p"
-        make_pdf(docs / f"{name}.pdf", n)
+        make_pdf(docs / f"{name}.pdf", n, secured=a.secured)
         expected[name] = n
     results = out / "results"
     cmd = [sys.executable, "-m", "doc_capture_harness", "batch", str(docs), "--out", str(results),

@@ -17,7 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        harness: ["current"]
+        include:
+          - name: reader64-plain
+            choco: ""
+            secured: ""
+          - name: reader32-secured        # closest to the user's setup (AcroRd32, SECURED PDFs)
+            choco: "--forcex86"
+            secured: "--secured"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,7 +36,23 @@ jobs:
       - name: Install Adobe Acrobat Reader
         shell: pwsh
         run: |
-          choco install adobereader -y --no-progress
+          choco install adobereader -y --no-progress ${{ matrix.choco }}
+          $want32 = "${{ matrix.choco }}" -ne ""
+          $x86 = Get-ChildItem "${env:ProgramFiles(x86)}\Adobe" -Recurse -Include AcroRd32.exe -ErrorAction SilentlyContinue
+          if ($want32 -and -not $x86) {
+            Write-Host "No 32-bit Reader after choco; trying Adobe's 32-bit installer"
+            $v = "2600222031"
+            foreach ($u in @("https://ardownload3.adobe.com/pub/adobe/acrobat/win/AcrobatDC/$v/AcroRdrDC${v}_MUI.exe",
+                             "https://ardownload2.adobe.com/pub/adobe/reader/win/AcrobatDC/$v/AcroRdrDC${v}_en_US.exe")) {
+              try {
+                Invoke-WebRequest $u -OutFile "$env:RUNNER_TEMP\rdr32.exe" -UseBasicParsing
+                choco uninstall adobereader -y --no-progress | Out-Null
+                Start-Process "$env:RUNNER_TEMP\rdr32.exe" -ArgumentList "/sAll /rs /msi EULA_ACCEPT=YES" -Wait
+                break
+              } catch { Write-Host "download failed: $u" }
+            }
+          }
+          Write-Host "Installed reader executables:"
           Get-ChildItem "C:\Program Files*\Adobe" -Recurse -Include AcroRd32.exe,Acrobat.exe -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName
 
@@ -46,32 +68,26 @@ jobs:
               Set-ItemProperty "$root\AVAlert\cCheckbox" -Name iAppDoNotTakePDFOwnershipAtLaunchWin10 -Value 1 -Type DWord
               Set-ItemProperty "$root\AVAlert\cCheckbox" -Name iAppDoNotTakePDFOwnershipAtLaunch -Value 1 -Type DWord
             }
-            $pol = "HKLM:\SOFTWARE\Policies\Adobe\$app\DC\FeatureLockDown"
-            New-Item -Path $pol -Force | Out-Null
-            Set-ItemProperty $pol -Name bAcroSuppressUpsell -Value 1 -Type DWord
-            Set-ItemProperty $pol -Name bToggleFTE -Value 1 -Type DWord
-            Set-ItemProperty $pol -Name bUsageMeasurement -Value 0 -Type DWord
-            Set-ItemProperty $pol -Name bIsSCReducedModeEnforcedEx -Value 1 -Type DWord
-            Set-ItemProperty $pol -Name bEnableGentech -Value 0 -Type DWord
+            foreach ($pol in "HKLM:\SOFTWARE\Policies\Adobe\$app\DC\FeatureLockDown",
+                             "HKLM:\SOFTWARE\WOW6432Node\Policies\Adobe\$app\DC\FeatureLockDown") {
+              New-Item -Path $pol -Force | Out-Null
+              Set-ItemProperty $pol -Name bAcroSuppressUpsell -Value 1 -Type DWord
+              Set-ItemProperty $pol -Name bToggleFTE -Value 1 -Type DWord
+              Set-ItemProperty $pol -Name bUsageMeasurement -Value 0 -Type DWord
+              Set-ItemProperty $pol -Name bIsSCReducedModeEnforcedEx -Value 1 -Type DWord
+              Set-ItemProperty $pol -Name bEnableGentech -Value 0 -Type DWord
+            }
           }
-
-      - name: Select harness version
-        id: h
-        shell: pwsh
-        run: |
-          if ("${{ matrix.harness }}" -eq "current") { $dir = "$PWD" }
-          else { git worktree add "$env:RUNNER_TEMP\h" "${{ matrix.harness }}"; $dir = "$env:RUNNER_TEMP\h" }
-          "dir=$dir" >> $env:GITHUB_OUTPUT
 
       - name: Benchmark (real Acrobat Reader)
         shell: cmd
-        run: .venv\Scripts\python.exe tools\acrobat_benchmark.py "%RUNNER_TEMP%\bench" --pages ${{ github.event.inputs.pages || '20,11' }} --harness-dir "${{ steps.h.outputs.dir }}"
+        run: .venv\Scripts\python.exe tools\acrobat_benchmark.py "%RUNNER_TEMP%\bench" --pages ${{ github.event.inputs.pages || '20,11' }} ${{ matrix.secured }}
 
       - name: Upload run folder
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-${{ matrix.harness }}
+          name: bench-${{ matrix.name }}
           path: |
             ${{ runner.temp }}\bench\benchmark.json
             ${{ runner.temp }}\bench\results\_runs\*\logs
