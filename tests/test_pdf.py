@@ -124,3 +124,18 @@ def test_image_only_fallback_without_tesseract(doc, tmp_path, monkeypatch):
     assert not res["text_layer"] and "image-only" in res["note"]
     assert res["verification"]["ok"] and len(PdfReader(res["files"][0]).pages) == 2
     assert json.loads((paths.manifest).read_text())["pdf"]["text_layer"] is False
+
+
+def test_page_labels_are_read_from_the_original(tmp_path):
+    from doc_capture_harness.pdf_output import OriginalInfo
+    w = PdfWriter()
+    for _ in range(6):
+        w.add_blank_page(612, 792)
+    w.set_page_label(0, 1, style="/r")              # i, ii
+    w.set_page_label(2, 5, style="/D")              # 1, 2, 3, 4
+    p = tmp_path / "labels.pdf"
+    with open(p, "wb") as f:
+        w.write(f)
+    assert OriginalInfo(p).page_labels() == ["i", "ii", "1", "2", "3", "4"]
+    enc = _real_pdf(tmp_path / "enc.pdf", 2, encrypt=True)
+    assert OriginalInfo(enc).page_labels() is None   # encrypted: not decrypted

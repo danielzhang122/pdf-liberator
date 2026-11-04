@@ -132,6 +132,11 @@ class ViewerAdapter(abc.ABC):
         """Type ``n`` into the viewer's page-number field (goto_method=page_field)."""
         return False
 
+    page_labels: Optional[list] = None   # document page labels, if known (go-to dialog input)
+
+    def close_stray_goto_dialogs(self) -> int:
+        return 0
+
     def open_goto_dialog_and_enter(self, n: int) -> bool:
         """Open the viewer's go-to-page dialog and submit ``n`` (goto_method=dialog)."""
         return False

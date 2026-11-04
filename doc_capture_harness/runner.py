@@ -263,14 +263,14 @@ class Harness:
 
     def _settle(self) -> bool:
         """Deal with anything that appeared after a key press (dialogs, other windows over
-        the page, the reader losing focus). True if something had to be dealt with."""
+        the page, the reader losing focus). True if the view may have changed (a dialog or
+        a window over the page was dealt with); regaining focus alone does not count."""
         intervened = bool(self._dialogs(self._safe_doc_rect()))
         try:
             if not self.adapter.is_foreground():
                 event(self.log, "focus_stolen", "another window took the focus; taking it back", level=30,
                       **self.adapter.focus_info())
                 self.adapter.bring_to_foreground()
-                intervened = True
         except Exception as exc:  # noqa: BLE001 - best effort
             event(self.log, "focus_check_failed", str(exc), level=10)
         return intervened
@@ -678,7 +678,8 @@ class Harness:
         if page >= max_pages:
             self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page)
             return None
-        outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
+        outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None,
+                                          goto_total=total)
         nav_flags = list(outcome.flags)
         while outcome.status == NavStatus.FAILED:
             self.save_diagnostics(f"page{page:04d}_nav_failed")
@@ -703,7 +704,8 @@ class Harness:
                     (not ind.readable and self.navigator._differs(state.frame, cur.frame)):
                 nav_flags = [Flag.MANUAL_OVERRIDE]
                 break
-            outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
+            outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None,
+                                          goto_total=total)
             nav_flags = list(outcome.flags)
         if outcome.status == NavStatus.END:
             self._end(outcome.end_reason or EndReason.STALL_UNCONFIRMED, outcome.reason, page)
@@ -821,11 +823,22 @@ class Harness:
                 self._with_focus(self.adapter.prepare_view)
                 self._wait_until_loaded()
                 self._check_layout()
+                orig = self._orig()
+                if orig.readable:
+                    labels = orig.page_labels()
+                    if labels and labels != [str(i) for i in range(1, len(labels) + 1)]:
+                        self.adapter.page_labels = labels
+                        event(self.log, "page_labels", f"document has page labels ({labels[0]} ... "
+                              f"{labels[-1]}); the go-to-page dialog is given labels")
                 if self.cfg.document.known_page_count is None:
                     self._page_count_hint = self._with_focus(self.adapter.page_count_hint)
                     if self._page_count_hint:
                         event(self.log, "page_count", f"the reader reports {self._page_count_hint} page(s); "
                               "capture stops after the last one")
+                        if orig.readable and orig.page_count and orig.page_count != self._page_count_hint:
+                            event(self.log, "page_count_disagreement", f"the PDF file has {orig.page_count} "
+                                  f"page(s), the reader shows {self._page_count_hint}; using the reader's count",
+                                  level=30)
                 env = self.adapter.environment_info()
                 env["dpi_awareness_requested"] = os.environ.get("DOC_CAPTURE_DPI_MODE", "")
                 self.manifest.data["environment"] = env

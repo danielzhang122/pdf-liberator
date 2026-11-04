@@ -28,6 +28,14 @@ try:
 except OSError:
     dwmapi = None
 
+user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+user32.GetDlgCtrlID.argtypes = [wintypes.HWND]
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 for _fn in ("GetForegroundWindow", "GetWindow", "GetAncestor"):
     getattr(user32, _fn).restype = wintypes.HWND
 user32.LoadCursorW.restype = wintypes.HANDLE
@@ -345,6 +353,45 @@ def set_window_text(hwnd: int, text: str, timeout_ms: int = 2000) -> bool:
     """WM_SETTEXT (works on edit controls of other processes; no keyboard involved)."""
     result = ctypes.c_size_t()
     return bool(_SendMessageTimeoutStr(hwnd, 0x000C, 0, text, 0x0002, timeout_ms, ctypes.byref(result)))
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+
+def focused_window() -> int:
+    """The window with keyboard focus (in the foreground thread), without UI Automation."""
+    gti = GUITHREADINFO()
+    gti.cbSize = ctypes.sizeof(GUITHREADINFO)
+    if user32.GetGUIThreadInfo(0, ctypes.byref(gti)):
+        return int(gti.hwndFocus or 0)
+    return 0
+
+
+def force_foreground(hwnd: int) -> None:
+    """Bring ``hwnd`` to the front even while another process holds the foreground:
+    attach to the foreground thread's input queue, SetForegroundWindow, detach."""
+    fg = foreground_window()
+    own_tid = kernel32.GetCurrentThreadId()
+    fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    attached = bool(fg_tid and fg_tid != own_tid and user32.AttachThreadInput(own_tid, fg_tid, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(own_tid, fg_tid, False)
+
+
+def click_dialog_command(dialog: int, button: int) -> bool:
+    """Press a dialog button by sending WM_COMMAND(BN_CLICKED) to the dialog itself.
+    Unlike BM_CLICK this also works while the dialog is not the active window."""
+    ctrl_id = int(user32.GetDlgCtrlID(button))
+    if not ctrl_id:
+        return False
+    return post_message(dialog, 0x0111, ctrl_id & 0xFFFF, button)      # WM_COMMAND, BN_CLICKED=0
 
 
 def message_box(text: str, title: str, flags: int) -> int:
