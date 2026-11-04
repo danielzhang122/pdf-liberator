@@ -213,7 +213,7 @@ class FakeViewer(ViewerAdapter):
             img.paste(small, (x, 10 + small.height + 20))      # next page peeking in below
             return img
         if self.s.layout == "zoomed":
-            big = page.resize((int(page.width * 1.3), int(page.height * 1.3)))
+            big = page.resize((int(page.width * 1.15), int(page.height * 1.15)))   # taller than the view
             img.paste(big, ((vw - big.width) // 2, 0))
             return img
         if self.s.fit == "width":

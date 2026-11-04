@@ -93,6 +93,21 @@ def estimate_canvas_color(img: Image.Image) -> tuple[int, int, int]:
     return tuple(int(x) for x in sel.mean(axis=0))  # type: ignore[return-value]
 
 
+def canvas_tolerance(canvas: tuple[int, int, int], tolerance: int) -> Optional[int]:
+    """Colour tolerance for telling page from canvas, or None if they cannot be told apart.
+
+    Newer Acrobat draws a very light grey canvas (around 240), close to page
+    white, so the tolerance is narrowed to half the gap between canvas and
+    white. Screen captures are lossless, so a few grey levels are reliable.
+    A white canvas (>= 250) cannot be separated from a white page.
+    """
+    if min(canvas) >= 250:
+        return None
+    if min(canvas) >= 200:
+        return max(2, min(tolerance, (255 - max(canvas)) // 2))
+    return tolerance
+
+
 def crop_to_page(img: Image.Image, tolerance: int = 14, padding: int = 4,
                  min_page_fraction: float = 0.15) -> CropResult:
     """Crop the viewport capture to the rendered page(s).
@@ -107,11 +122,12 @@ def crop_to_page(img: Image.Image, tolerance: int = 14, padding: int = 4,
     rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
     h, w, _ = rgb.shape
     canvas = estimate_canvas_color(img)
-    if min(canvas) >= 235:
-        # The border is (near) white: the page itself fills the viewport edge,
-        # so its edges cannot be located. Keep the whole viewport.
+    tol = canvas_tolerance(canvas, tolerance)
+    if tol is None:
+        # The border is white: either the page fills the viewport edge or the
+        # canvas is white, so page edges cannot be located. Keep the whole viewport.
         return CropResult(img, (0, 0, w, h), True, canvas)
-    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tolerance
+    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tol
     # A row/column is "page" if a meaningful share of it differs from canvas;
     # this ignores thin scrollbars, page shadows and stray cursor pixels.
     row_share = diff.mean(axis=1)
@@ -206,14 +222,15 @@ def page_bands(img: Image.Image, tolerance: int = 14, min_gap: int = 6,
                min_band_fraction: float = 0.05) -> Optional[list[tuple[int, int]]]:
     """Vertical extents of page content separated by canvas rows.
 
-    Returns None when the canvas cannot be identified (near-white border).
+    Returns None when the canvas cannot be identified (white border).
     """
     canvas = estimate_canvas_color(img)
-    if min(canvas) >= 235:
+    tol = canvas_tolerance(canvas, tolerance)
+    if tol is None:
         return None
     rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
     h = rgb.shape[0]
-    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tolerance
+    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tol
     rows = diff.mean(axis=1) > 0.15
     bands: list[list[int]] = []
     start = None
@@ -239,12 +256,9 @@ def layout_issues(img: Image.Image, tolerance: int = 14) -> list[str]:
     from .models import Flag
 
     bands = page_bands(img, tolerance)
-    if bands is None:
-        # No canvas visible on any edge: the page covers the whole viewport, so
-        # parts of it are almost certainly off-screen (readers' canvases are grey
-        # by default; set capture.layout_check: false for a white-canvas reader).
-        return [Flag.PAGE_CUT_OFF]
     if not bands:
+        # None: white border, so the layout cannot be judged from the image.
+        # Do not block on that; the page crop flags such pages for review.
         return []
     issues = []
     if len(bands) > 1:
@@ -253,3 +267,11 @@ def layout_issues(img: Image.Image, tolerance: int = 14) -> list[str]:
     if bands[0][0] <= 0 or bands[-1][1] >= h:
         issues.append(Flag.PAGE_CUT_OFF)
     return issues
+
+
+def layout_diagnostics(img: Image.Image, tolerance: int = 14) -> dict:
+    """Numbers behind :func:`layout_issues`, for the log."""
+    canvas = estimate_canvas_color(img)
+    return {"viewport": list(img.size), "canvas_rgb": list(canvas),
+            "tolerance_used": canvas_tolerance(canvas, tolerance),
+            "page_bands_y": page_bands(img, tolerance)}

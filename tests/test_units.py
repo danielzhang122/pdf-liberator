@@ -298,3 +298,21 @@ def test_acrobat_profile_ignores_floating_toolbars():
     titled = DialogInfo(8, "Something", "AVL_AVPopup", 1, Rect(0, 0, 50, 300), ["?"], ["OK"], True)
     from doc_capture_harness.prompts import rule_matches
     assert not any(rule_matches(r, titled) for r in cfg.prompts.rules if r.name == "acrobat-floating-toolbars")
+
+
+@pytest.mark.parametrize("grey", [229, 240, 246])
+def test_light_grey_canvas_is_still_detected(grey):
+    from doc_capture_harness.imaging import layout_issues
+    page = make_page(1)
+    vp = Image.new("RGB", (800, 900), (grey, grey, grey))
+    vp.paste(page, (100, 60))
+    res = crop_to_page(vp, padding=0)
+    assert not res.fallback and abs(res.box[0] - 100) <= 1 and abs(res.box[1] - 60) <= 1
+    assert layout_issues(vp) == []
+
+
+def test_white_canvas_does_not_block():
+    from doc_capture_harness.imaging import layout_issues
+    vp = Image.new("RGB", (800, 900), "white")
+    vp.paste(make_page(1), (100, 60))
+    assert layout_issues(vp) == [] and crop_to_page(vp).fallback

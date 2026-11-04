@@ -24,7 +24,7 @@ from .errors import (CaptureBlocked, EmergencyStop, FocusLost, HarnessError, Res
                      UserAbort)
 from .estop import EmergencyStopMonitor
 from .imaging import (changed_fraction, crop_to_page, dhash, hamming, is_all_black, is_uniform,
-                      layout_issues, sha256_image, stitch_vertical)
+                      layout_diagnostics, layout_issues, sha256_image, stitch_vertical)
 from .logging_utils import event, setup_logging
 from .manual import ManualCheckpoint
 from .models import EndReason, Flag, NavStatus, PageIndicator, Rect
@@ -307,12 +307,21 @@ class Harness:
         """Before page 1: the view must show exactly one whole page (fit_page mode)."""
         if not (self.cfg.capture.layout_check and self.cfg.capture.mode == "fit_page"):
             return
+        tol = self.cfg.capture.crop.canvas_tolerance
+        reapplied = False
         while True:
             res = self._stable()
-            issues = layout_issues(res.frame, self.cfg.capture.crop.canvas_tolerance)
+            issues = layout_issues(res.frame, tol)
             if not issues:
                 return
-            event(self.log, "layout_problem", ", ".join(issues), level=30)
+            event(self.log, "layout_problem", ", ".join(issues), level=30,
+                  **layout_diagnostics(res.frame, tol))
+            if not reapplied and self.cfg.viewer.prepare_keys:
+                # The fit-page key may not have reached the page view; press it again once.
+                reapplied = True
+                event(self.log, "layout_retry", "re-applying the fit-page zoom and checking again")
+                self._with_focus(self.adapter.prepare_view)
+                continue
             why = []
             if Flag.MULTI_PAGE_VIEW in issues:
                 why.append("more than one page is visible (continuous or two-page layout)")
