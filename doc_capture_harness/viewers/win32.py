@@ -254,6 +254,24 @@ class Win32ViewerAdapter(ViewerAdapter):
     def screen_layout(self, rect: Rect):
         return pw.virtual_screen(), pw.monitors_for_rect(rect)
 
+    def focus_info(self) -> dict:
+        info: dict = {}
+        try:
+            fg = pw.foreground_window()
+            info.update(fg_hwnd=fg, fg_is_viewer=(fg == self.hwnd), fg_class=pw.get_class_name(fg) if fg else "",
+                        fg_title=pw.get_window_text(fg) if fg else "", fg_pid=pw.window_pid(fg) if fg else 0)
+        except Exception as exc:
+            info["fg_error"] = str(exc)
+        try:
+            el = self._iuia().iuia.GetFocusedElement()
+            info.update(focus_name=el.CurrentName, focus_type=self._CT_NAMES.get(el.CurrentControlType,
+                        el.CurrentControlType), focus_class=el.CurrentClassName,
+                        focus_hwnd=el.CurrentNativeWindowHandle, focus_is_pane=(
+                            bool(self._pane_hwnd) and el.CurrentNativeWindowHandle == self._pane_hwnd))
+        except Exception as exc:
+            info["focus_error"] = str(exc)
+        return info
+
     def find_overlays(self, doc_rect: Optional[Rect]) -> list[str]:
         """Exact-name UI Automation search (native FindFirst, fast) for each name in
         ``viewer.overlay_names``; reports the ones shown over ``doc_rect``.

@@ -94,6 +94,13 @@ def main() -> int:
         if e.get("level") in ("WARNING", "ERROR"):
             print(e["ts"], e.get("event"), e.get("msg"), {k: v for k, v in e.items()
                                                            if k not in ("ts", "level", "event", "msg")})
+    print("\n=== navigation attempts (key presses and what had focus) ===")
+    for e in events:
+        if e.get("event") in ("nav_attempt", "end_of_document", "resume_position"):
+            print(e["ts"], json.dumps({k: v for k, v in e.items() if k not in ("ts", "level")}, default=str))
+    print("\n=== diagnostics ===")
+    for f in sorted((results / "_runs").glob("*/diagnostics/*.json")):
+        print(f.name, f.read_text(encoding="utf-8")[:3000])
     avg = sum(per_page) / len(per_page) if per_page else None
     summary = {"exit_code": rc, "wall_s": round(wall, 1), "pages_expected": a.pages,
                "pages_captured": report.get("pages_captured"), "status": report.get("status"),
@@ -103,7 +110,8 @@ def main() -> int:
                "capture_breakdown_s": (report.get("timings") or {}).get("capture_breakdown_s")}
     (out / "benchmark.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("\n=== summary ===\n" + json.dumps(summary, indent=2))
-    ok = avg is not None and avg <= a.limit and report.get("pages_captured") == a.pages
+    ok = (avg is not None and avg <= a.limit and report.get("pages_captured") == a.pages
+          and report.get("status") == "completed")
     print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
