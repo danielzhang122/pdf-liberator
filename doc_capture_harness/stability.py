@@ -31,8 +31,21 @@ class StabilityResult:
 def wait_for_stable(grab: Callable[[], Image.Image], cfg: StabilityConfig,
                     sleep: Callable[[float], None] = time.sleep,
                     is_busy: Optional[Callable[[], Optional[bool]]] = None,
-                    timeout_s: Optional[float] = None) -> StabilityResult:
+                    timeout_s: Optional[float] = None,
+                    region: Optional[tuple[int, int, int, int]] = None) -> StabilityResult:
+    """``region`` (left, top, right, bottom) limits the comparison to the page
+    area, so UI animation elsewhere in the view (toolbars, spinners, carets)
+    cannot keep the page from being considered stable."""
     timeout = cfg.timeout_s if timeout_s is None else timeout_s
+
+    def part(img: Image.Image) -> Image.Image:
+        if region is None:
+            return img
+        l, t, r, b = region
+        l, t = max(0, l), max(0, t)
+        r, b = min(img.width, r), min(img.height, b)
+        return img.crop((l, t, r, b)) if r - l >= 32 and b - t >= 32 else img
+
     start = time.monotonic()
     sleep(cfg.min_wait_s)
     prev = grab()
@@ -46,7 +59,7 @@ def wait_for_stable(grab: Callable[[], Image.Image], cfg: StabilityConfig,
         sleep(cfg.interval_s)
         cur = grab()
         frames += 1
-        last = changed_fraction(prev, cur, cfg.pixel_threshold, cfg.downscale)
+        last = changed_fraction(part(prev), part(cur), cfg.pixel_threshold, cfg.downscale)
         history.append(round(last, 5))
         busy = bool(is_busy()) if is_busy else False
         busy_seen = busy_seen or busy

@@ -114,7 +114,7 @@ class StabilityConfig:
     pixel_threshold: int = 10              # per-pixel grey difference that counts as change
     changed_fraction_threshold: float = 0.0008
     min_wait_s: float = 0.3
-    timeout_s: float = 20.0
+    timeout_s: float = 10.0
     downscale: int = 2
 
 
@@ -143,7 +143,7 @@ class CaptureConfig:
     stability: StabilityConfig = field(default_factory=StabilityConfig)
     scroll: ScrollConfig = field(default_factory=ScrollConfig)
     crop: CropConfig = field(default_factory=CropConfig)
-    retries: int = 3
+    retries: int = 2
     nav_retries: int = 2
     same_page_threshold: float = 0.0015
     blank_std_threshold: float = 2.0

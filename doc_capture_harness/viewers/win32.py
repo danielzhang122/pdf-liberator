@@ -45,7 +45,10 @@ class Win32ViewerAdapter(ViewerAdapter):
         self._pane_hwnd: Optional[int] = None
         self._pane_warned = False
         self._uia = None
-        self._indicator_controls: Optional[list] = None
+        from ..lookup_cache import ScanCache
+        self._indicator_cache = ScanCache(self._scan_indicator, retry_after_s=60.0)
+        self._desc_cache: dict[int, tuple] = {}
+        self._pane_el = None
         self._ignore_title = [re.compile(p) for p in (ignore_title_re or [])]
 
     # ------------------------------------------------------------------ lifecycle
@@ -133,7 +136,9 @@ class Win32ViewerAdapter(ViewerAdapter):
 
         self.hwnd, self.pid = w.hwnd, w.pid
         self._pane_hwnd = None
-        self._indicator_controls = None
+        self._indicator_cache.reset()
+        self._desc_cache.clear()
+        self._pane_el = None
         self._uia = Desktop(backend="uia").window(handle=w.hwnd)
         event(self.log, "viewer_attached", f"attached to {w.title!r}", hwnd=w.hwnd, pid=w.pid,
               class_name=w.class_name, exe=pw.process_image_name(w.pid))
@@ -309,37 +314,97 @@ class Win32ViewerAdapter(ViewerAdapter):
             mfc.DeleteDC()
             win32gui.ReleaseDC(self.hwnd, hwnd_dc)
 
-    # ------------------------------------------------------------------ page indicator
-    def _control_text(self, ctrl) -> str:
+    # ------------------------------------------------------------------ native UI Automation
+    # pywinauto's descendants() builds a Python wrapper for every element of the
+    # whole tree. Acrobat exposes the document's text through that tree, so a
+    # full walk takes seconds (and can trigger Acrobat's slow accessibility
+    # "reading" pass). These helpers walk natively, never enter the document
+    # pane, and are bounded in node count and time.
+    _CT_BUTTON, _CT_COMBOBOX, _CT_EDIT, _CT_TEXT = 50000, 50003, 50004, 50020
+    _CT_NAMES = {50000: "Button", 50003: "ComboBox", 50004: "Edit", 50020: "Text"}
+
+    @staticmethod
+    def _iuia():
+        from pywinauto.uia_defines import IUIA
+        return IUIA()
+
+    def _walk(self, root_hwnds: list[int], want, *, max_nodes: int, max_s: float,
+              max_depth: int = 25) -> list:
+        """Depth-first walk of the UIA control view under ``root_hwnds``,
+        skipping the document pane; returns elements for which ``want(el)``."""
+        u = self._iuia()
+        walker = u.iuia.ControlViewWalker
+        skip = {h for h in (self._pane_hwnd,) if h}
+        deadline = time.monotonic() + max_s
+        stack, out, visited = [], [], 0
+        for h in root_hwnds:
+            try:
+                stack.append((u.iuia.ElementFromHandle(h), 0))
+            except Exception:
+                continue
+        while stack and visited < max_nodes and time.monotonic() < deadline:
+            el, depth = stack.pop()
+            visited += 1
+            try:
+                if el.CurrentNativeWindowHandle in skip:
+                    continue          # the page view: document content lives below it
+                if want(el):
+                    out.append(el)
+                if depth >= max_depth:
+                    continue
+                kids = []
+                child = walker.GetFirstChildElement(el)
+                while child:
+                    kids.append(child)
+                    child = walker.GetNextSiblingElement(child)
+                stack.extend((k, depth + 1) for k in reversed(kids))
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _el_text(el) -> str:
         parts = []
         try:
-            parts.append(ctrl.element_info.name or "")
+            parts.append(el.CurrentName or "")
         except Exception:
             pass
         try:
-            v = ctrl.iface_value.CurrentValue
+            from pywinauto.uia_defines import get_elem_interface
+            v = get_elem_interface(el, "Value").CurrentValue
             if v:
                 parts.append(str(v))
         except Exception:
             pass
         return " ".join(p for p in parts if p).strip()
 
-    def _scan_indicator_controls(self) -> list:
+    def _viewer_popups(self) -> list[int]:
+        """The reader's own floating tool windows (newer Acrobat puts the page
+        navigation box in one of them)."""
+        return [w.hwnd for w in pw.top_level_windows()
+                if w.pid == self.pid and w.hwnd != self.hwnd and not w.title and w.rect.area > 0]
+
+    # ------------------------------------------------------------------ page indicator
+    def _scan_indicator(self) -> list[tuple[str, object]]:
         icfg = self.cfg.page_indicator
         name_re = re.compile(icfg.control_name_re) if icfg.control_name_re else None
-        found = []
-        wrapper = self._uia.wrapper_object()
-        for ct in icfg.control_types:
-            try:
-                ctrls = wrapper.descendants(control_type=ct)
-            except Exception:
-                continue
-            for c in ctrls[: icfg.max_uia_controls]:
-                text = self._control_text(c)
-                if not text or (name_re and not name_re.search(text)):
-                    continue
-                if any(re.search(p, text) for p in icfg.patterns + icfg.total_patterns):
-                    found.append(c)
+        pats = [re.compile(p) for p in icfg.patterns + icfg.total_patterns]
+        wanted_types = {t for t, n in self._CT_NAMES.items() if n in icfg.control_types}
+
+        def want(el) -> bool:
+            if el.CurrentControlType not in wanted_types:
+                return False
+            text = self._el_text(el)
+            if not text or (name_re and not name_re.search(text)):
+                return False
+            return any(p.search(text) for p in pats)
+
+        t0 = time.monotonic()
+        els = self._walk([self.hwnd] + self._viewer_popups(), want,
+                         max_nodes=icfg.max_uia_controls * 10, max_s=3.0)
+        found = [(self._CT_NAMES.get(el.CurrentControlType, "Text"), el) for el in els]
+        event(self.log, "indicator_scan", f"page-number search: {len(found)} candidate(s) in "
+              f"{time.monotonic() - t0:.1f}s", level=10)
         return found
 
     def _parse_indicator(self, texts: list[tuple[str, str]], source: str) -> PageIndicator:
@@ -371,19 +436,21 @@ class Win32ViewerAdapter(ViewerAdapter):
         return PageIndicator(current, total, " | ".join(raw), source if current is not None else "none")
 
     def read_page_indicator(self) -> PageIndicator:
+        """Read the page box from cached UI elements (a few COM calls). The
+        search for those elements runs once, and is retried at most once a
+        minute while nothing usable is found."""
         icfg = self.cfg.page_indicator
         if not icfg.enabled:
             return PageIndicator()
         try:
-            if self._indicator_controls is None:
-                self._indicator_controls = self._scan_indicator_controls()
-            texts = [(c.element_info.control_type, self._control_text(c)) for c in self._indicator_controls]
-            ind = self._parse_indicator(texts, "uia")
-            if ind.readable:
-                return ind
-            self._indicator_controls = None   # stale cache: rescan next time
+            controls = self._indicator_cache.get() or []
+            if controls:
+                ind = self._parse_indicator([(ct, self._el_text(el)) for ct, el in controls], "uia")
+                if ind.readable:
+                    return ind
+                self._indicator_cache.mark_stale()
         except Exception as exc:
-            self._indicator_controls = None
+            self._indicator_cache.mark_stale()
             event(self.log, "indicator_uia_error", str(exc), level=10)
         if icfg.ocr_region:
             try:
@@ -404,6 +471,13 @@ class Win32ViewerAdapter(ViewerAdapter):
 
     # ------------------------------------------------------------------ dialogs
     def _describe(self, w: pw.TopWindow, owned: bool) -> DialogInfo:
+        """Title, texts and buttons of a window; cached per window while its title
+        and class are unchanged (described once, not on every dialog check)."""
+        key = (w.title, w.class_name)
+        hit = self._desc_cache.get(w.hwnd)
+        if hit and hit[0] == key:
+            d = hit[1]
+            return DialogInfo(w.hwnd, w.title, w.class_name, w.pid, w.rect, d.texts, d.buttons, owned)
         texts, buttons = [], []
         for h, cls, text, _r in pw.child_windows(w.hwnd):
             if not text:
@@ -414,16 +488,17 @@ class Win32ViewerAdapter(ViewerAdapter):
                 texts.append(text)
         if not texts and not buttons:
             try:
-                from pywinauto import Desktop
-                wrapper = Desktop(backend="uia").window(handle=w.hwnd).wrapper_object()
-                for c in wrapper.descendants()[:80]:
-                    name = (c.element_info.name or "").strip()
-                    if not name:
-                        continue
-                    (buttons if c.element_info.control_type == "Button" else texts).append(name)
+                for el in self._walk([w.hwnd], lambda e: bool((e.CurrentName or "").strip()),
+                                     max_nodes=200, max_s=1.0):
+                    name = el.CurrentName.strip()
+                    (buttons if el.CurrentControlType == self._CT_BUTTON else texts).append(name)
             except Exception:
                 pass
-        return DialogInfo(w.hwnd, w.title, w.class_name, w.pid, w.rect, texts[:40], buttons[:20], owned)
+        d = DialogInfo(w.hwnd, w.title, w.class_name, w.pid, w.rect, texts[:40], buttons[:20], owned)
+        if len(self._desc_cache) > 200:
+            self._desc_cache.clear()
+        self._desc_cache[w.hwnd] = (key, d)
+        return d
 
     def list_dialogs(self, doc_rect: Optional[Rect]) -> list[DialogInfo]:
         out: list[DialogInfo] = []
@@ -497,11 +572,12 @@ class Win32ViewerAdapter(ViewerAdapter):
         self._ensure_focus()
         if self._pane_hwnd:
             try:
-                from pywinauto import Desktop
-                Desktop(backend="uia").window(handle=self._pane_hwnd).wrapper_object().set_focus()
+                if self._pane_el is None or self._pane_el[0] != self._pane_hwnd:
+                    self._pane_el = (self._pane_hwnd, self._iuia().iuia.ElementFromHandle(self._pane_hwnd))
+                self._pane_el[1].SetFocus()      # one native call (was a pywinauto lookup per key)
                 return
             except Exception:
-                pass
+                self._pane_el = None
         if self.cfg.focus_pane_by_click:
             dr = self.document_rect()
             # Left edge of the viewport is canvas in fit-page view (no links/forms).
@@ -539,16 +615,15 @@ class Win32ViewerAdapter(ViewerAdapter):
         return False
 
     def enter_page_number(self, n: int) -> bool:
-        if self._indicator_controls is None:
-            self.read_page_indicator()
-        edits = [c for c in (self._indicator_controls or []) if c.element_info.control_type == "Edit"]
+        edits = [el for ct, el in (self._indicator_cache.get() or []) if ct == "Edit"]
         if not edits:
             return False
         try:
+            from pywinauto.uia_defines import get_elem_interface
             edit = edits[0]
             self._ensure_focus()
-            edit.set_focus()
-            edit.set_edit_text(str(n))
+            edit.SetFocus()
+            get_elem_interface(edit, "Value").SetValue(str(n))
             self.inputs.send_keys("{ENTER}")
             self.estop.sleep(0.2)
             self.focus_document()

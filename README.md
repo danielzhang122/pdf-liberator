@@ -103,6 +103,8 @@ Capture is sequential: one reader on one screen, about 0.5–1.5 s per page depe
 - **Constant-cost state.** Every page is saved as its own small record (`records/page_NNNN.json`). The run summary is rewritten at most every 5 s, not after every page. A crash loses no captured page, and `resume` continues from the next page.
 - **Verification sampling.** The PDF text-layer check covers 60 evenly spaced pages (`pdf.verify_sample_pages`), plus an exact page count.
 
+**Per-page console line.** Every captured page prints where its time went, for example `page 12/240 captured in 2.8s [render wait 1.6, dialog checks 0.1, page number 0.0, keys/other 1.1]`. Searches of the reader's interface (page number box, dialog contents) run once and are cached, never on every page. The page-number search skips the document content, and a failed search is retried at most once a minute. OCR processes run at below-normal priority, so they never slow the reader down.
+
 Measured on a 4-core Linux machine with a simulated reader, 1100×1430-pixel pages, 30 lines of text each:
 
 | Pages | OCR workers | Capture | OCR left after capture | PDF assembly | Total | Searchable PDF |

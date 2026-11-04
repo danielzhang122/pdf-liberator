@@ -144,7 +144,8 @@ def run_tesseract(img: Image.Image, cfg: OcrConfig, upscale: float, *, want_pdf:
                 "--dpi", str(dpi), *cfg.extra_config.split(), "tsv"]
         if want_pdf:
             args.append("pdf")
-        flags = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
+        # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: OCR never starves the reader's rendering.
+        flags = (0x08000000 | 0x00004000) if sys.platform == "win32" else 0
         proc = subprocess.run(args, capture_output=True, timeout=timeout_s, creationflags=flags)
         if proc.returncode != 0:
             raise RuntimeError(f"tesseract failed ({proc.returncode}): "

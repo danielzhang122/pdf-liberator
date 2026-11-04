@@ -6,6 +6,8 @@ The runner is reader-agnostic: it talks to a :class:`ViewerAdapter` and a
 """
 from __future__ import annotations
 
+import collections
+import contextlib
 import os
 import shutil
 import stat
@@ -82,6 +84,8 @@ class Harness:
         self._orig_info = None
         self.deadline: Optional[float] = None
         self._first_checkpoint_done = False
+        self._timers: dict[str, float] = collections.defaultdict(float)
+        self._page_region = None
         self._placeholder_ocr_ok: Optional[bool] = None
 
     # ================================================================== helpers
@@ -119,7 +123,7 @@ class Harness:
                 except Exception as exc:
                     info["dialogs_error"] = str(exc)
                 try:
-                    ind = self.adapter.read_page_indicator()
+                    ind = self._indicator()
                     info["indicator"] = {"current": ind.current, "total": ind.total, "raw": ind.raw}
                 except Exception as exc:
                     info["indicator_error"] = str(exc)
@@ -214,15 +218,42 @@ class Harness:
                 self.checkpoint("mixed_dpi", "The reader window spans monitors with different scaling. "
                                              "Move it fully onto one monitor, then Retry.")
 
+    @contextlib.contextmanager
+    def _timed(self, name: str):
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            self._timers[name] += time.monotonic() - t0
+
+    def _set_page_region(self, box, view_size) -> None:
+        """Remember where the page sits in the view, so stability is judged on the page only."""
+        if box:
+            l, t, r, b = box
+            self._page_region = ((l - 12, t - 12, r + 12, b + 12), tuple(view_size))
+
     def _stable(self, rect: Optional[Rect] = None, timeout: Optional[float] = None):
         rect = rect or self._doc_rect()
         self.adapter.park_cursor()
-        return wait_for_stable(lambda: self.source.grab(rect), self.cfg.capture.stability,
-                               sleep=self._sleep, is_busy=self.adapter.is_busy, timeout_s=timeout)
+        region = None
+        if self._page_region and self._page_region[1] == (rect.width, rect.height):
+            region = self._page_region[0]
+        with self._timed("render_wait"):
+            return wait_for_stable(lambda: self.source.grab(rect), self.cfg.capture.stability,
+                                   sleep=self._sleep, is_busy=self.adapter.is_busy, timeout_s=timeout,
+                                   region=region)
+
+    def _indicator(self) -> PageIndicator:
+        with self._timed("page_number"):
+            return self.adapter.read_page_indicator()
+
+    def _dialogs(self, rect: Optional[Rect]) -> int:
+        with self._timed("dialog_checks"):
+            return self.prompts.handle(rect)
 
     def _observe(self) -> ViewState:
         res = self._stable()
-        ind = self.adapter.read_page_indicator()
+        ind = self._indicator()
         return ViewState(res.frame, ind, res.stable)
 
     def _placeholder(self, img: Image.Image) -> Optional[str]:
@@ -324,6 +355,7 @@ class Harness:
                     continue
             res = self._stable()
             diag = layout_diagnostics(res.frame, tol)
+            self._set_page_region(diag["page_box"], res.frame.size)
             event(self.log, "layout", f"page detected at {diag['page_box']} in a {diag['viewport']} view "
                   f"(canvas {diag['canvas_rgb']}, {diag['mode']})", level=20)
             if diag["page_box"] is None:
@@ -363,7 +395,7 @@ class Harness:
             attempts = attempt
             self.estop.check()
             flags = []
-            if self.prompts.handle(self._safe_doc_rect()):
+            if self._dialogs(self._safe_doc_rect()):
                 self._sleep(0.3)
             rect = self._doc_rect()
             self._check_rect_on_screen(rect)
@@ -371,12 +403,12 @@ class Harness:
             res = self._stable(rect)
             info = {"stability_s": round(res.elapsed_s, 3), "frames": res.frames,
                     "busy_seen": res.busy_seen, "document_rect": rect.to_dict()}
-            if self.prompts.handle(rect):        # a dialog popped up during capture
+            if self._dialogs(rect):              # a dialog popped up during capture
                 retry_reasons.append("dialog_during_capture")
                 continue
             img = res.frame
             last_raw = img
-            ind = self.adapter.read_page_indicator()
+            ind = self._indicator()
             if not res.stable:
                 flags.append(Flag.UNSTABLE)
                 retry_reasons.append(Flag.UNSTABLE)
@@ -421,7 +453,7 @@ class Harness:
             self.adapter.scroll_down(sc.wheel_notches)
             res = self._stable(rect)
             last_view = res.frame
-            ind = self.adapter.read_page_indicator()
+            ind = self._indicator()
             if ind0.readable and ind.readable and ind.current != ind0.current:
                 crossed = True
                 break
@@ -468,6 +500,8 @@ class Harness:
             cr = crop_to_page(img, cc.canvas_tolerance, cc.padding, cc.min_page_fraction)
             img = cr.image
             rec["crop_box"] = list(cr.box)
+            if not cr.fallback and self.cfg.capture.mode == "fit_page":
+                self._set_page_region(cr.box, cap.image.size)
             rec["canvas_color"] = cr.canvas_color
             if cr.fallback:
                 flags.append(Flag.CROP_FALLBACK)
@@ -528,6 +562,7 @@ class Harness:
         page = start
         nav_s = time.monotonic() - t_nav
         t_loop, pages_done = time.monotonic(), 0
+        t_prev, timers_prev = time.monotonic(), dict(self._timers)
         while True:
             self.estop.check()
             if self.deadline is not None and time.monotonic() > self.deadline:
@@ -546,12 +581,21 @@ class Harness:
                 self.pipeline.submit(page)
                 self.pipeline.poll()
             pages_done += 1
-            rate = (time.monotonic() - t_loop) / pages_done
+            now = time.monotonic()
+            rate = (now - t_loop) / pages_done
+            cycle = now - t_prev
+            part = {k: self._timers[k] - timers_prev.get(k, 0.0)
+                    for k in ("render_wait", "dialog_checks", "page_number")}
+            other = max(0.0, cycle - sum(part.values()))
+            t_prev, timers_prev = now, dict(self._timers)
             tot = total or None
             eta = f", ETA {((tot - page) * rate) / 60:.1f} min" if tot and tot > page else ""
-            event(self.log, "progress", f"page {page}/{tot or '?'} captured ({rate:.1f}s/page{eta}; "
-                  f"OCR done {self.pipeline.done if self.pipeline else 0}, queued "
-                  f"{len(self.pipeline.pending) if self.pipeline else 0})", page=page)
+            event(self.log, "progress", f"page {page}/{tot or '?'} captured in {cycle:.1f}s "
+                  f"[render wait {part['render_wait']:.1f}, dialog checks {part['dialog_checks']:.1f}, "
+                  f"page number {part['page_number']:.1f}, keys/other {other:.1f}] "
+                  f"avg {rate:.1f}s/page{eta}; OCR done {self.pipeline.done if self.pipeline else 0}, "
+                  f"queued {len(self.pipeline.pending) if self.pipeline else 0}", page=page,
+                  seconds=round(cycle, 2), **{f"{k}_s": round(v, 2) for k, v in part.items()})
             state = ViewState(cap.raw_frame if cap.raw_frame is not None else state.frame,
                               cap.indicator if cap.indicator.readable else state.indicator, True)
             total, total_src = self._known_total(state.indicator)
@@ -718,6 +762,8 @@ class Harness:
                 self._capture_loop()
                 self.manifest.data["timings"]["capture_s"] = round(
                     self.manifest.data["timings"].get("capture_s", 0) + time.monotonic() - t_cap, 3)
+                self.manifest.data["timings"]["capture_breakdown_s"] = {
+                    k: round(v, 2) for k, v in self._timers.items()}
                 self.manifest.data["status_capture"] = "complete"
                 self.manifest.save()
                 if self.cfg.viewer.close_on_finish:
