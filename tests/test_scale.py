@@ -4,7 +4,6 @@ import io
 import json
 import time
 
-import pytest
 from PIL import Image
 from pypdf import PdfReader
 
@@ -189,8 +188,7 @@ def test_pdf_pages_come_from_the_ocr_pass(doc, tmp_path):
     assert not list((tmp_path / "r" / "ocr" / "pdf").glob("*.pdf"))   # intermediates removed
 
 
-@pytest.mark.parametrize("layout,flag", [("continuous", Flag.MULTI_PAGE_VIEW), ("zoomed", Flag.PAGE_CUT_OFF)])
-def test_layout_problems_detected(doc, tmp_path, layout, flag):
+def test_continuous_layout_detected(doc, tmp_path):
     cfg = fast_config(doc)
     asked = []
 
@@ -198,9 +196,27 @@ def test_layout_problems_detected(doc, tmp_path, layout, flag):
         asked.append(reason)
         return "continue"
 
-    code, h, rep, v = run(cfg, Scenario([make_page(i) for i in range(1, 3)], layout=layout), tmp_path / "a", responder)
+    code, h, rep, v = run(cfg, Scenario([make_page(i) for i in range(1, 3)], layout="continuous"), tmp_path / "a",
+                          responder)
     assert asked == ["layout"]
-    assert flag in rep["pages"][0]["flags"] and code == EXIT_WARNINGS
+    assert Flag.MULTI_PAGE_VIEW in rep["pages"][0]["flags"] and code == EXIT_WARNINGS
+
+
+def test_page_touching_view_edges_does_not_block(doc, tmp_path):
+    """A page filling the view height is not treated as cut off (fit-page was applied)."""
+    cfg = fast_config(doc)
+    code, h, rep, v = run(cfg, Scenario([make_page(i) for i in range(1, 3)], layout="zoomed"), tmp_path / "a")
+    assert rep["pages_captured"] == 2 and rep["status"] == "completed"
+
+
+def test_overlay_on_page_stops_document_unattended(doc, tmp_path):
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(1), make_page(2)], overlays=["Ask AI Assistant"])
+    h = Harness(cfg, tmp_path / "r", lambda c, e: FakeViewer(sc, cfg.viewer, e, c), lambda a: FakeSource(a))
+    assert h.run() == EXIT_STOPPED
+    rep = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert "needs attention (overlay)" in rep["end"]["detail"] and "Ask AI Assistant" in rep["end"]["detail"]
+    assert rep["pages_captured"] == 0
 
 
 def test_layout_unattended_stops_with_reason(doc, tmp_path):

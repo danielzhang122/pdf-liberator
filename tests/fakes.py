@@ -63,6 +63,7 @@ class Scenario:
     stuck_next: dict[int, int] = field(default_factory=dict)
     fit: str = "page"                       # page | width (scroll mode)
     layout: str = "single"                  # single | continuous (two pages visible) | zoomed (page cut off)
+    overlays: list = field(default_factory=list)   # reader UI drawn over the page (e.g. "Ask AI Assistant")
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -120,6 +121,9 @@ class FakeViewer(ViewerAdapter):
 
     def environment_info(self) -> dict:
         return {"os": "simulated"}
+
+    def find_overlays(self, doc_rect):
+        return list(self.s.overlays)
 
     # -- dialogs
     def list_dialogs(self, doc_rect):

@@ -316,3 +316,64 @@ def test_white_canvas_does_not_block():
     vp = Image.new("RGB", (800, 900), "white")
     vp.paste(make_page(1), (100, 60))
     assert layout_issues(vp) == [] and crop_to_page(vp).fallback
+
+
+# ----------------------------------------------------------------- the reported Acrobat dark-theme screen
+
+def _acrobat_dark_view(*, flush=True, panel=True, ai_bar=False, second_page=False):
+    """1568x995 view, canvas (29,29,29), as logged on the user's machine."""
+    from PIL import ImageDraw
+    vw, vh = 1568, 995
+    vp = Image.new("RGB", (vw, vh), (29, 29, 29))
+    ph = vh if flush else vh - 16
+    page = make_page(1, 600, 780).resize((int(ph * 8.5 / 11), ph))
+    if second_page:
+        page = page.resize((page.width // 2, page.height // 2))
+    x = (vw - page.width) // 2
+    y = 0 if flush else 8
+    vp.paste(page, (x, y))
+    if second_page:
+        vp.paste(page, (x, y + page.height + 20))
+    d = ImageDraw.Draw(vp)
+    if panel:   # dark full-height side panel, wider than 15% of the view
+        d.rectangle([0, 0, 320, vh - 1], fill=(44, 44, 44))
+        d.rectangle([20, 40, 300, 60], fill=(200, 200, 200))     # a little light text in the panel
+    d.rectangle([340, 300, 380, 640], fill=(52, 52, 52))          # floating tool strip on the canvas
+    if ai_bar:  # bar drawn over the bottom of the page
+        d.rectangle([x + 25, vh - 70, x + page.width - 25, vh - 10], fill=(40, 40, 40))
+    return vp, (x, y, x + page.width, y + page.height)
+
+
+@pytest.mark.parametrize("flush", [True, False])
+def test_dark_theme_view_from_user_report(flush):
+    from doc_capture_harness.imaging import layout_diagnostics, layout_issues
+    vp, (x0, y0, x1, y1) = _acrobat_dark_view(flush=flush)
+    assert layout_issues(vp) == []                                  # was: page_extends_beyond_view
+    d = layout_diagnostics(vp)
+    assert d["mode"] == "bright" and d["canvas_rgb"] == [29, 29, 29]
+    res = crop_to_page(vp, padding=0)
+    l, t, r, b = res.box
+    assert not res.fallback
+    assert abs(l - x0) <= 2 and abs(r - x1) <= 2                    # side panel and tool strip excluded
+    assert abs(t - y0) <= 2 and abs(b - y1) <= 2
+
+
+def test_dark_theme_continuous_layout_still_detected():
+    from doc_capture_harness.imaging import layout_issues
+    from doc_capture_harness.models import Flag
+    vp, _ = _acrobat_dark_view(flush=False, second_page=True)
+    assert layout_issues(vp) == [Flag.MULTI_PAGE_VIEW]
+
+
+def test_dark_theme_ai_bar_does_not_confuse_crop():
+    vp, (x0, y0, x1, y1) = _acrobat_dark_view(ai_bar=True)
+    l, t, r, b = crop_to_page(vp, padding=0).box
+    assert abs(l - x0) <= 2 and abs(r - x1) <= 2 and abs(t - y0) <= 2 and abs(b - y1) <= 2
+
+
+@pytest.mark.parametrize("canvas", [(82, 82, 82), (128, 128, 128), (229, 229, 229), (240, 240, 240)])
+def test_page_found_on_common_canvas_colours(canvas):
+    vp = Image.new("RGB", (900, 900), canvas)
+    vp.paste(make_page(1), (150, 60))
+    l, t, r, b = crop_to_page(vp, padding=0).box
+    assert abs(l - 150) <= 1 and abs(t - 60) <= 1 and abs(r - 750) <= 2 and abs(b - 840) <= 2

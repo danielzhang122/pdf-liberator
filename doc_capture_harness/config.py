@@ -99,6 +99,9 @@ class ViewerConfig:
     # Message shown at a manual checkpoint after the document opens, for setup
     # that cannot be automated reliably (page layout, closing banners, ...).
     setup_checkpoint: Optional[str] = None
+    # Exact UI Automation names of reader elements that, when shown over the
+    # document area, hide page content; checked before page 1.
+    overlay_names: list[str] = field(default_factory=list)
     close_on_finish: bool = False
 
 

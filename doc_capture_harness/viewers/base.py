@@ -84,6 +84,11 @@ class ViewerAdapter(abc.ABC):
         """
         return None
 
+    def find_overlays(self, doc_rect: Optional[Rect]) -> list[str]:
+        """Names of known reader UI elements drawn over the document area
+        (``viewer.overlay_name_re``), e.g. Acrobat's AI Assistant bar."""
+        return []
+
     def park_cursor(self) -> None:
         """Move the mouse pointer off the document so hover effects are not captured."""
 

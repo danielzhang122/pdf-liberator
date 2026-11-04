@@ -108,39 +108,84 @@ def canvas_tolerance(canvas: tuple[int, int, int], tolerance: int) -> Optional[i
     return tolerance
 
 
-def crop_to_page(img: Image.Image, tolerance: int = 14, padding: int = 4,
-                 min_page_fraction: float = 0.15) -> CropResult:
-    """Crop the viewport capture to the rendered page(s).
+def _page_mask(img: Image.Image, tolerance: int):
+    """Boolean mask of "page" pixels, plus canvas colour and detection mode.
 
-    The viewer draws pages on a uniform canvas (grey in most readers). Pixels
-    that differ from the canvas colour by more than ``tolerance`` on any
-    channel are treated as page content, and the bounding box of rows/columns
-    that are mostly non-canvas gives the page. If the page fills the whole
-    viewport, or the detection is implausibly small, the full viewport is
-    returned with ``fallback=True``.
+    * Dark or medium canvas (dark theme ~29, classic Acrobat grey ~82): the page
+      is the *paper*, i.e. bright pixels. Dark UI on the canvas (side panels,
+      tool strips, AI/message bars, scrollbars) is never mistaken for page.
+    * Light canvas (newer Acrobat ~240): pixels that differ from the canvas,
+      with a tolerance narrowed to half the gap to white.
+    * White canvas: undecidable -> None.
     """
     rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
-    h, w, _ = rgb.shape
     canvas = estimate_canvas_color(img)
+    lum = sum(canvas) / 3.0
+    if lum < 160:
+        gray = rgb.mean(axis=2)
+        return gray >= max(lum + 60.0, 150.0), canvas, "bright", rgb
     tol = canvas_tolerance(canvas, tolerance)
     if tol is None:
-        # The border is white: either the page fills the viewport edge or the
-        # canvas is white, so page edges cannot be located. Keep the whole viewport.
-        return CropResult(img, (0, 0, w, h), True, canvas)
+        return None, canvas, "undecidable", rgb
     diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tol
-    # A row/column is "page" if a meaningful share of it differs from canvas;
-    # this ignores thin scrollbars, page shadows and stray cursor pixels.
-    row_share = diff.mean(axis=1)
-    col_share = diff.mean(axis=0)
-    # Thresholds are relative to the strongest row/column, so a floating
-    # toolbar or scrollbar over the canvas (covering only part of the height
-    # or width) is not mistaken for part of the page.
-    rows = np.where(row_share > max(0.15, 0.5 * float(row_share.max())))[0]
-    cols = np.where(col_share > max(0.15, 0.5 * float(col_share.max())))[0]
-    if rows.size == 0 or cols.size == 0:
+    return diff, canvas, "diff", rgb
+
+
+def _longest_run(flags: np.ndarray, max_gap: int = 8) -> Optional[tuple[int, int]]:
+    """Longest run of True values, bridging gaps of up to ``max_gap``."""
+    idx = np.where(flags)[0]
+    if idx.size == 0:
+        return None
+    best, start, prev = None, int(idx[0]), int(idx[0])
+    for i in idx[1:]:
+        i = int(i)
+        if i - prev > max_gap + 1:
+            if best is None or prev - start > best[1] - best[0]:
+                best = (start, prev)
+            start = i
+        prev = i
+    if best is None or prev - start > best[1] - best[0]:
+        best = (start, prev)
+    return best[0], best[1] + 1
+
+
+def find_page_box(img: Image.Image, tolerance: int = 14):
+    """Locate the page in a viewport capture.
+
+    Columns are found first (the longest run of columns that are mostly page),
+    then rows *within those columns*. Thresholds are relative to the strongest
+    column/row, so partial-height strips or partial-width bars are ignored.
+    Returns (box, canvas, mode) with box = (left, top, right, bottom) or None.
+    """
+    mask, canvas, mode, _ = _page_mask(img, tolerance)
+    if mask is None:
+        return None, canvas, mode
+    col_share = mask.mean(axis=0)
+    if float(col_share.max()) <= 0.05:
+        return None, canvas, mode
+    cols = _longest_run(col_share > max(0.05, 0.5 * float(col_share.max())))
+    if cols is None:
+        return None, canvas, mode
+    c0, c1 = cols
+    row_share = mask[:, c0:c1].mean(axis=1)
+    if float(row_share.max()) <= 0.05:
+        return None, canvas, mode
+    rows = np.where(row_share > max(0.05, 0.3 * float(row_share.max())))[0]
+    return (c0, int(rows[0]), c1, int(rows[-1]) + 1), canvas, mode
+
+
+def crop_to_page(img: Image.Image, tolerance: int = 14, padding: int = 4,
+                 min_page_fraction: float = 0.15) -> CropResult:
+    """Crop the viewport capture to the rendered page (see :func:`find_page_box`).
+
+    If the page cannot be located, or the detection is implausibly small, the
+    full viewport is returned with ``fallback=True``.
+    """
+    w, h = img.size
+    box, canvas, _ = find_page_box(img, tolerance)
+    if box is None:
         return CropResult(img, (0, 0, w, h), True, canvas)
-    top, bottom = int(rows[0]), int(rows[-1]) + 1
-    left, right = int(cols[0]), int(cols[-1]) + 1
+    left, top, right, bottom = box
     if (bottom - top) * (right - left) < min_page_fraction * w * h:
         return CropResult(img, (0, 0, w, h), True, canvas)
     box = (max(0, left - padding), max(0, top - padding), min(w, right + padding), min(h, bottom + padding))
@@ -220,24 +265,23 @@ def stitch_vertical(slices: list[Image.Image], template_rows: int = 48, max_mean
 
 def page_bands(img: Image.Image, tolerance: int = 14, min_gap: int = 6,
                min_band_fraction: float = 0.05) -> Optional[list[tuple[int, int]]]:
-    """Vertical extents of page content separated by canvas rows.
-
-    Returns None when the canvas cannot be identified (white border).
-    """
-    canvas = estimate_canvas_color(img)
-    tol = canvas_tolerance(canvas, tolerance)
-    if tol is None:
+    """Vertical extents of page content within the page's columns, split by
+    rows that are canvas-coloured across those columns (the gap between two
+    pages in a continuous layout). None if the page cannot be located."""
+    box, canvas, mode = find_page_box(img, tolerance)
+    if box is None:
         return None
-    rgb = np.asarray(img.convert("RGB"), dtype=np.int16)
+    c0, _, c1, _ = box
+    rgb = np.asarray(img.convert("RGB"), dtype=np.int16)[:, c0:c1]
     h = rgb.shape[0]
-    diff = np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) > tol
-    rows = diff.mean(axis=1) > 0.15
+    tol = tolerance if mode == "bright" else (canvas_tolerance(canvas, tolerance) or tolerance)
+    canvas_like = (np.abs(rgb - np.array(canvas, dtype=np.int16)).max(axis=2) <= tol).mean(axis=1) >= 0.9
     bands: list[list[int]] = []
     start = None
-    for y, on in enumerate(rows):
-        if on and start is None:
+    for y, gap in enumerate(canvas_like):
+        if not gap and start is None:
             start = y
-        elif not on and start is not None:
+        elif gap and start is not None:
             bands.append([start, y])
             start = None
     if start is not None:
@@ -252,26 +296,26 @@ def page_bands(img: Image.Image, tolerance: int = 14, min_gap: int = 6,
 
 
 def layout_issues(img: Image.Image, tolerance: int = 14) -> list[str]:
-    """Fit-page sanity checks on a raw viewport capture (see Flag.MULTI_PAGE_VIEW / PAGE_CUT_OFF)."""
+    """Fit-page sanity check: more than one page visible (continuous/two-up layout).
+
+    A page touching the top/bottom edge is *not* treated as a problem: after the
+    fit-page key it is how a page that exactly fills the view looks, and it
+    cannot be told apart from a cut-off page by the image alone. It is reported
+    in :func:`layout_diagnostics` only.
+    """
     from .models import Flag
 
     bands = page_bands(img, tolerance)
-    if not bands:
-        # None: white border, so the layout cannot be judged from the image.
-        # Do not block on that; the page crop flags such pages for review.
-        return []
-    issues = []
-    if len(bands) > 1:
-        issues.append(Flag.MULTI_PAGE_VIEW)
-    h = img.height
-    if bands[0][0] <= 0 or bands[-1][1] >= h:
-        issues.append(Flag.PAGE_CUT_OFF)
-    return issues
+    if bands and len(bands) > 1:
+        return [Flag.MULTI_PAGE_VIEW]
+    return []
 
 
 def layout_diagnostics(img: Image.Image, tolerance: int = 14) -> dict:
     """Numbers behind :func:`layout_issues`, for the log."""
-    canvas = estimate_canvas_color(img)
-    return {"viewport": list(img.size), "canvas_rgb": list(canvas),
-            "tolerance_used": canvas_tolerance(canvas, tolerance),
+    box, canvas, mode = find_page_box(img, tolerance)
+    w, h = img.size
+    return {"viewport": [w, h], "canvas_rgb": list(canvas), "mode": mode,
+            "page_box": list(box) if box else None,
+            "page_touches_top_or_bottom": bool(box and (box[1] <= 1 or box[3] >= h - 1)),
             "page_bands_y": page_bands(img, tolerance)}

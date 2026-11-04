@@ -63,6 +63,7 @@ PROFILES: dict[str, dict] = {
         "prepare_keys": ["^0"],            # Ctrl+0: zoom to page level (fit page)
         "goto_method": "dialog",
         "goto_dialog_title_re": r"(?i)go to page",
+        "overlay_names": ["Ask AI Assistant"],   # label of the AI Assistant bar
         # Page layout has no default shortcut, so it is a manual step.
         "setup_checkpoint": (
             "One-time Acrobat setting (remembered for every document): Edit > Preferences > "

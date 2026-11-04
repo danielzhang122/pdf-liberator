@@ -249,6 +249,31 @@ class Win32ViewerAdapter(ViewerAdapter):
     def screen_layout(self, rect: Rect):
         return pw.virtual_screen(), pw.monitors_for_rect(rect)
 
+    def find_overlays(self, doc_rect: Optional[Rect]) -> list[str]:
+        """Exact-name UI Automation search (native FindFirst, fast) for each name in
+        ``viewer.overlay_names``; reports the ones shown over ``doc_rect``.
+        Best effort: any failure means "none found"."""
+        if not self.cfg.overlay_names or doc_rect is None:
+            return []
+        found: list[str] = []
+        try:
+            from pywinauto.uia_defines import IUIA
+
+            uia = IUIA()
+            root = self._uia.wrapper_object().element_info.element
+            for name in self.cfg.overlay_names:
+                cond = uia.iuia.CreatePropertyCondition(uia.UIA_dll.UIA_NamePropertyId, name)
+                el = root.FindFirst(uia.tree_scope["descendants"], cond)
+                if not el:
+                    continue
+                r = el.CurrentBoundingRectangle
+                rect = Rect(int(r.left), int(r.top), int(r.right), int(r.bottom))
+                if not el.CurrentIsOffscreen and not rect.is_empty() and rect.intersects(doc_rect):
+                    found.append(name)
+        except Exception as exc:  # noqa: BLE001 - detection is optional
+            event(self.log, "overlay_scan_failed", f"{type(exc).__name__}: {exc}", level=10)
+        return found
+
     def park_cursor(self) -> None:
         wr = self.window_rect()
         dr = self.document_rect()

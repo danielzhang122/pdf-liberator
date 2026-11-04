@@ -304,34 +304,45 @@ class Harness:
             return fn()
 
     def _check_layout(self) -> None:
-        """Before page 1: the view must show exactly one whole page (fit_page mode)."""
+        """Before page 1: nothing drawn over the page, and exactly one page in view (fit_page mode)."""
         if not (self.cfg.capture.layout_check and self.cfg.capture.mode == "fit_page"):
             return
         tol = self.cfg.capture.crop.canvas_tolerance
-        reapplied = False
+        reapplied = overlays_accepted = False
         while True:
+            if not overlays_accepted:
+                overlays = self.adapter.find_overlays(self._safe_doc_rect())
+                if overlays:
+                    event(self.log, "overlay_on_page", ", ".join(overlays), level=30)
+                    ans = self.checkpoint(
+                        "overlay", f"The reader shows {', '.join(repr(o) for o in overlays)} on top of the page, "
+                        "which would hide part of every captured page. Turn it off in the reader (Acrobat AI "
+                        "Assistant: Menu > Preferences > Generative AI > untick 'Enable generative AI features', "
+                        "then restart Acrobat), then choose Retry.")
+                    if ans == "continue":
+                        overlays_accepted = True
+                    continue
             res = self._stable()
+            diag = layout_diagnostics(res.frame, tol)
+            event(self.log, "layout", f"page detected at {diag['page_box']} in a {diag['viewport']} view "
+                  f"(canvas {diag['canvas_rgb']}, {diag['mode']})", level=20)
+            if diag["page_box"] is None:
+                event(self.log, "layout_unknown", "could not locate the page in the view; pages will be "
+                      "kept uncropped and flagged for review", level=30)
             issues = layout_issues(res.frame, tol)
             if not issues:
                 return
-            event(self.log, "layout_problem", ", ".join(issues), level=30,
-                  **layout_diagnostics(res.frame, tol))
+            event(self.log, "layout_problem", ", ".join(issues), level=30, **diag)
             if not reapplied and self.cfg.viewer.prepare_keys:
                 # The fit-page key may not have reached the page view; press it again once.
                 reapplied = True
                 event(self.log, "layout_retry", "re-applying the fit-page zoom and checking again")
                 self._with_focus(self.adapter.prepare_view)
                 continue
-            why = []
-            if Flag.MULTI_PAGE_VIEW in issues:
-                why.append("more than one page is visible (continuous or two-page layout)")
-            if Flag.PAGE_CUT_OFF in issues:
-                why.append("the page runs off the top or bottom of the view: either the zoom is higher than "
-                           "fit-page, or something is drawn over the page edge (e.g. Acrobat's AI Assistant "
-                           "bar or a document message bar - turn those off)")
-            ans = self.checkpoint("layout", "The reader view is not suitable for capture: " + "; ".join(why)
-                                  + ".\nSwitch to Single Page view and fit-page zoom (Acrobat: Ctrl+0), "
-                                  "then choose Retry. Ignore continues anyway (pages will be flagged).")
+            ans = self.checkpoint("layout", "More than one page is visible in the reader (continuous or two-page "
+                                  "layout). Set Single Page view (Acrobat: Menu > Preferences > Page Display > "
+                                  "Page Layout = Single Page), then choose Retry. Ignore continues anyway (pages "
+                                  "will be flagged).")
             if ans == "continue":
                 return
 
