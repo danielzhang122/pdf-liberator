@@ -86,6 +86,7 @@ class Harness:
         self._first_checkpoint_done = False
         self._timers: dict[str, float] = collections.defaultdict(float)
         self._page_region = None
+        self._page_count_hint: Optional[int] = None
         self._placeholder_ocr_ok: Optional[bool] = None
 
     # ================================================================== helpers
@@ -539,6 +540,8 @@ class Harness:
             return known, "known_page_count"
         if ind.total is not None and self.navigator.indicator_trusted:
             return ind.total, "viewer_indicator"
+        if self._page_count_hint:
+            return self._page_count_hint, "viewer_page_count"
         return None, "unknown"
 
     def _end(self, reason: EndReason, detail: str, last_page: int) -> None:
@@ -644,13 +647,13 @@ class Harness:
         max_pages = self.cfg.document.max_pages
         total, total_src = self._known_total(state.indicator)
         if total is not None and page >= total:
-            self._end(EndReason.KNOWN_PAGE_COUNT if total_src == "known_page_count" else EndReason.INDICATOR_TOTAL,
+            self._end(EndReason.INDICATOR_TOTAL if total_src == "viewer_indicator" else EndReason.KNOWN_PAGE_COUNT,
                       f"{total_src}={total}", page)
             return None
         if page >= max_pages:
             self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page)
             return None
-        outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+        outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
         nav_flags = list(outcome.flags)
         while outcome.status == NavStatus.FAILED:
             self.save_diagnostics(f"page{page:04d}_nav_failed")
@@ -675,7 +678,7 @@ class Harness:
                     (not ind.readable and self.navigator._differs(state.frame, cur.frame)):
                 nav_flags = [Flag.MANUAL_OVERRIDE]
                 break
-            outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+            outcome = self.navigator.advance(page, state, total if total_src in ("known_page_count", "viewer_page_count") else None)
             nav_flags = list(outcome.flags)
         if outcome.status == NavStatus.END:
             self._end(outcome.end_reason or EndReason.STALL_UNCONFIRMED, outcome.reason, page)
@@ -793,6 +796,11 @@ class Harness:
                 self._with_focus(self.adapter.prepare_view)
                 self._wait_until_loaded()
                 self._check_layout()
+                if self.cfg.document.known_page_count is None:
+                    self._page_count_hint = self._with_focus(self.adapter.page_count_hint)
+                    if self._page_count_hint:
+                        event(self.log, "page_count", f"the reader reports {self._page_count_hint} page(s); "
+                              "capture stops after the last one")
                 env = self.adapter.environment_info()
                 env["dpi_awareness_requested"] = os.environ.get("DOC_CAPTURE_DPI_MODE", "")
                 self.manifest.data["environment"] = env

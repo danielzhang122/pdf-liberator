@@ -254,6 +254,42 @@ class Win32ViewerAdapter(ViewerAdapter):
     def screen_layout(self, rect: Rect):
         return pw.virtual_screen(), pw.monitors_for_rect(rect)
 
+    def page_count_hint(self) -> Optional[int]:
+        """Open the go-to-page dialog, read "of N" from it, and cancel it."""
+        if not self.cfg.keys.goto_page or not self.cfg.goto_dialog_title_re:
+            return None
+        title_re = re.compile(self.cfg.goto_dialog_title_re)
+        try:
+            self.send_keys(self.cfg.keys.goto_page)
+        except Exception as exc:
+            event(self.log, "page_count_probe", f"could not open the go-to-page dialog: {exc}", level=30)
+            return None
+        dlg = None
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and dlg is None:
+            self.estop.sleep(0.15)
+            dlg = next((d for d in self.list_dialogs(None) if d.owned_by_viewer and title_re.search(d.title)), None)
+        if dlg is None:
+            event(self.log, "page_count_probe", "go-to-page dialog did not appear", level=30)
+            return None
+        total = None
+        for t in dlg.texts + dlg.buttons:
+            m = re.search(r"(?i)\bof\s+(\d+)", t) or re.search(r"/\s*(\d+)\s*\)?\s*$", t)
+            if m:
+                total = int(m.group(1))
+                break
+        event(self.log, "page_count_probe", f"go-to-page dialog: total pages = {total}", level=20,
+              texts=dlg.texts, buttons=dlg.buttons)
+        closed = self.click_dialog_button(dlg, "Cancel")
+        if not closed:
+            self.send_dialog_keys(dlg, "{ESC}")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and pw.is_window(dlg.handle) and pw.is_visible(dlg.handle):
+            self.estop.sleep(0.1)
+        if pw.is_window(dlg.handle) and pw.is_visible(dlg.handle):
+            event(self.log, "page_count_probe", "go-to-page dialog did not close", level=30)
+        return total if total and total > 0 else None
+
     def focus_info(self) -> dict:
         info: dict = {}
         try:

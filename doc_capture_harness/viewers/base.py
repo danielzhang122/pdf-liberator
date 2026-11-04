@@ -84,6 +84,11 @@ class ViewerAdapter(abc.ABC):
         """
         return None
 
+    def page_count_hint(self) -> Optional[int]:
+        """Total page count as shown by the reader's own UI (e.g. a go-to-page
+        dialog), read once before capture; None if not available."""
+        return None
+
     def focus_info(self) -> dict:
         """Which window / UI element currently has keyboard focus (for diagnostics)."""
         return {}

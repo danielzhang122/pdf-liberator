@@ -64,6 +64,8 @@ class Scenario:
     fit: str = "page"                       # page | width (scroll mode)
     layout: str = "single"                  # single | continuous (two pages visible) | zoomed (page cut off)
     overlays: list = field(default_factory=list)   # reader UI drawn over the page (e.g. "Ask AI Assistant")
+    prev_broken: bool = False               # "previous page" key has no effect (seen in Acrobat)
+    goto_dialog: bool = False               # supports a go-to-page dialog (Acrobat Ctrl+Shift+N)
     on_page_shown: Optional[Callable[[int], None]] = None
 
 
@@ -122,6 +124,16 @@ class FakeViewer(ViewerAdapter):
     def environment_info(self) -> dict:
         return {"os": "simulated"}
 
+    def open_goto_dialog_and_enter(self, n: int) -> bool:
+        if not self.s.goto_dialog or not (1 <= n <= len(self.s.pages)):
+            return False
+        self.page, self.scroll = n - 1, 0
+        self._show()
+        return True
+
+    def page_count_hint(self):
+        return len(self.s.pages) if self.s.goto_dialog else None
+
     def find_overlays(self, doc_rect):
         return list(self.s.overlays)
 
@@ -161,7 +173,7 @@ class FakeViewer(ViewerAdapter):
                 self.scroll = 0
                 self._show()
         elif keys == k.prev_page:
-            if self.page > 0:
+            if self.page > 0 and not self.s.prev_broken:
                 self.page -= 1
                 self.scroll = 0
                 self._show()

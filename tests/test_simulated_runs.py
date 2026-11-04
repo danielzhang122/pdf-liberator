@@ -156,7 +156,7 @@ def test_emergency_stop_then_resume(doc, tmp_path):
     assert code == EXIT_OK, rep
     assert rep["pages_captured"] == 6 and rep["sessions"] == 2
     log = (rd / "logs" / "harness.jsonl").read_text()
-    assert f'"resuming at page {done + 1}"' in log
+    assert f"returning to page {done} (last captured)" in log
 
 
 def test_resume_refuses_changed_document(doc, tmp_path):
@@ -211,3 +211,61 @@ def test_full_run_with_ocr(doc, tmp_path):
     assert rep["ocr"]["mean_of_page_mean_conf"] > 80
     md = (tmp_path / "r" / "report.md").read_text()
     assert "Per-page detail" in md
+
+
+def test_last_page_known_from_goto_dialog_ends_and_merges(doc, tmp_path):
+    """Field case: 11 pages, no readable page number, Acrobat ignores 'previous page'.
+    The page count comes from the reader's go-to-page dialog, so capture stops exactly
+    after page 11 (no end probe needed) and the merged PDF is built."""
+    from pypdf import PdfReader
+
+    cfg = fast_config(doc, pdf={"enabled": True, "text_layer": False})
+    sc = Scenario([make_page(i) for i in range(1, 12)], indicator=False, prev_broken=True, goto_dialog=True)
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")
+    assert code == EXIT_OK and rep["status"] == "completed" and rep["pages_captured"] == 11
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value and not rep["end_is_uncertain"]
+    assert rep["end"]["detail"] == "viewer_page_count=11"
+    assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
+
+
+def test_unresponsive_navigation_without_page_count_is_never_a_silent_end(doc, tmp_path):
+    """Without any page count, 'keys stopped working' must not be mistaken for the end
+    (the real-Acrobat benchmark saw this mid-document): the document is set aside."""
+    cfg = fast_config(doc)
+    sc = Scenario([make_page(i) for i in range(1, 12)], indicator=False, prev_broken=True,
+                  stuck_next={5: 99})
+    h = Harness(cfg, tmp_path / "r", lambda c, e: FakeViewer(sc, cfg.viewer, e, c), lambda a: FakeSource(a),
+                skip_ocr=True)
+    assert h.run() == EXIT_STOPPED
+    rep = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert rep["status"] == "aborted" and rep["pages_captured"] == 5
+    assert "navigation" in rep["end"]["detail"]
+
+
+def test_resume_of_run_stopped_at_last_page_finishes_and_merges(doc, tmp_path):
+    """Exactly the reported state: all 11 pages captured, then the old version stopped with
+    'navigation_failed'. Resuming must go back to page 11, see it is the end, and build the PDF
+    without asking anything (unattended)."""
+    from pypdf import PdfReader
+    from doc_capture_harness.state import Manifest, RunPaths
+
+    pages = [make_page(i) for i in range(1, 12)]
+    rd = tmp_path / "r"
+    cfg = fast_config(doc, pdf={"enabled": True, "text_layer": False}, viewer={"goto_method": "dialog"})
+    run(cfg, Scenario(pages, indicator=False), rd)
+    m = Manifest.load(RunPaths(rd))
+    m.data.update(status="aborted", status_capture=None,
+                  end={"reason": "user_abort", "detail": "needs attention (navigation_failed): ...", "last_page": 11})
+    m.data.pop("pdf", None)
+    m.save(include_pages=True)
+    for f in (rd / "output").glob("*.pdf"):
+        f.unlink()
+
+    sc = Scenario(pages, indicator=False, prev_broken=True, goto_dialog=True)
+    code, h, rep, v = run(cfg, sc, rd, resume=True)          # any checkpoint fails the test
+    assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
+    assert rep["status"] == "completed" and rep["pages_captured"] == 11
+    assert v.page == 10                                       # went straight to page 11 (0-based 10)
+    assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
+    log = (rd / "logs" / "harness.jsonl").read_text()
+    assert "returning to page 11" in log
