@@ -1,0 +1,79 @@
+name: acrobat-benchmark
+
+# Real-reader speed check: installs Adobe Acrobat Reader on a Windows runner,
+# captures a generated 20-page PDF with the harness and reports seconds per
+# page from the harness log. Compares the previous release with this commit.
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Pages in the generated test PDF"
+        default: "20"
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ["v1.2.4", "current"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install harness (install.ps1, as Capture.bat does)
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+
+      - name: Install Adobe Acrobat Reader
+        shell: pwsh
+        run: |
+          choco install adobereader -y --no-progress
+          Get-ChildItem "C:\Program Files*\Adobe" -Recurse -Include AcroRd32.exe,Acrobat.exe -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
+
+      - name: Pre-accept Reader first-run prompts (standard deployment settings)
+        shell: pwsh
+        run: |
+          foreach ($app in "Acrobat Reader", "Adobe Acrobat") {
+            foreach ($root in "HKCU:\Software\Adobe\$app\DC", "HKCU:\Software\Adobe\$app\2015") {
+              New-Item -Path "$root\AdobeViewer" -Force | Out-Null
+              Set-ItemProperty "$root\AdobeViewer" -Name EULA -Value 1 -Type DWord
+              Set-ItemProperty "$root\AdobeViewer" -Name Launched -Value 1 -Type DWord
+              New-Item -Path "$root\AVAlert\cCheckbox" -Force | Out-Null
+              Set-ItemProperty "$root\AVAlert\cCheckbox" -Name iAppDoNotTakePDFOwnershipAtLaunchWin10 -Value 1 -Type DWord
+              Set-ItemProperty "$root\AVAlert\cCheckbox" -Name iAppDoNotTakePDFOwnershipAtLaunch -Value 1 -Type DWord
+            }
+            $pol = "HKLM:\SOFTWARE\Policies\Adobe\$app\DC\FeatureLockDown"
+            New-Item -Path $pol -Force | Out-Null
+            Set-ItemProperty $pol -Name bAcroSuppressUpsell -Value 1 -Type DWord
+            Set-ItemProperty $pol -Name bToggleFTE -Value 1 -Type DWord
+            Set-ItemProperty $pol -Name bUsageMeasurement -Value 0 -Type DWord
+            Set-ItemProperty $pol -Name bIsSCReducedModeEnforcedEx -Value 1 -Type DWord
+            Set-ItemProperty $pol -Name bEnableGentech -Value 0 -Type DWord
+          }
+
+      - name: Select harness version
+        id: h
+        shell: pwsh
+        run: |
+          if ("${{ matrix.harness }}" -eq "current") { $dir = "$PWD" }
+          else { git worktree add "$env:RUNNER_TEMP\h" "${{ matrix.harness }}"; $dir = "$env:RUNNER_TEMP\h" }
+          "dir=$dir" >> $env:GITHUB_OUTPUT
+
+      - name: Benchmark (real Acrobat Reader)
+        shell: cmd
+        run: .venv\Scripts\python.exe tools\acrobat_benchmark.py "%RUNNER_TEMP%\bench" --pages ${{ github.event.inputs.pages || '20' }} --harness-dir "${{ steps.h.outputs.dir }}"
+
+      - name: Upload run folder
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.harness }}
+          path: |
+            ${{ runner.temp }}\bench\benchmark.json
+            ${{ runner.temp }}\bench\results\_runs\*\logs
+            ${{ runner.temp }}\bench\results\_runs\*\diagnostics
+            ${{ runner.temp }}\bench\results\_runs\*\report.md
