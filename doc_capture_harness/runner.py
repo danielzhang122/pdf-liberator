@@ -326,7 +326,9 @@ class Harness:
             if Flag.MULTI_PAGE_VIEW in issues:
                 why.append("more than one page is visible (continuous or two-page layout)")
             if Flag.PAGE_CUT_OFF in issues:
-                why.append("the page is cut off at the top or bottom (zoom is higher than fit-page)")
+                why.append("the page runs off the top or bottom of the view: either the zoom is higher than "
+                           "fit-page, or something is drawn over the page edge (e.g. Acrobat's AI Assistant "
+                           "bar or a document message bar - turn those off)")
             ans = self.checkpoint("layout", "The reader view is not suitable for capture: " + "; ".join(why)
                                   + ".\nSwitch to Single Page view and fit-page zoom (Acrobat: Ctrl+0), "
                                   "then choose Retry. Ignore continues anyway (pages will be flagged).")

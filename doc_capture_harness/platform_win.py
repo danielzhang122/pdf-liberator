@@ -352,5 +352,21 @@ def os_version() -> str:
     return f"{platform.platform()} ({platform.version()})"
 
 
+def desktop_is_interactive() -> bool:
+    """True if this process can reach the active input desktop (unlocked, interactive).
+
+    More reliable than GetForegroundWindow, which is briefly 0 while focus
+    moves between windows (e.g. when a console starts).
+    """
+    user32.OpenInputDesktop.restype = wintypes.HANDLE
+    h = user32.OpenInputDesktop(0, False, 0x0100)   # DESKTOP_SWITCHDESKTOP
+    if not h:
+        return False
+    try:
+        return bool(user32.SwitchDesktop(h))         # fails while the workstation is locked
+    finally:
+        user32.CloseDesktop(h)
+
+
 def own_pid() -> int:
     return os.getpid()

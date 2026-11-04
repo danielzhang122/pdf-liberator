@@ -100,7 +100,7 @@ def _check_display(results):
                         "`batch --dry-run` work here", "run captures on Windows"))
         return
     from . import platform_win as pw
-    mode = pw.enable_dpi_awareness()
+    mode = pw.current_dpi_awareness()
     results.append((OK if mode.startswith("per_monitor") else WARN, "DPI awareness", mode,
                     "" if mode.startswith("per_monitor") else "captures may be misaligned on scaled displays"))
     mons = pw.monitors()
@@ -116,8 +116,8 @@ def _check_display(results):
     if small:
         results.append((WARN, "Screen size", f"primary height {small[0].rect.height}px",
                         "a taller screen (or portrait monitor) gives larger pages and better OCR"))
-    if pw.foreground_window() == 0:
-        results.append((FAIL, "Interactive desktop", "no foreground window (locked or non-interactive session?)",
+    if not pw.desktop_is_interactive():
+        results.append((FAIL, "Interactive desktop", "desktop is locked or not interactive",
                         "run in an unlocked, visible desktop session; disable screen lock and sleep during batches"))
     else:
         results.append((OK, "Interactive desktop", "available", ""))
@@ -145,6 +145,10 @@ def run_doctor(raw: dict, out_dir: Path, echo=print) -> int:
         "profile", "auto") == "auto" else raw
     cfg = build_config(cfg_raw)
     results: list[tuple[str, str, str, str]] = []
+    if sys.platform == "win32":
+        # Must happen before pywinauto is imported (it sets system-level awareness).
+        from . import platform_win
+        platform_win.enable_dpi_awareness()
     _check_python(results)
     _check_imports(results)
     _check_tesseract(results, cfg)
