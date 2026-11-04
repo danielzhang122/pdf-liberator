@@ -96,7 +96,7 @@ python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be
 
 ## Large documents
 
-Capture is sequential: one reader on one screen, about 0.5–1.5 s per page depending on how fast the reader renders. Everything else is built so that cost per page stays flat for documents with thousands of pages:
+Capture is sequential: one reader on one screen. With real Acrobat Reader, the CI benchmark ([Testing](#testing)) measured about **1.9–2.5 s per page** in steady state (20-page document, 1024×768 Windows runner). Everything else is built so that cost per page stays flat for documents with thousands of pages:
 
 - **Parallel OCR while capturing.** Each page goes to a pool of Tesseract processes as soon as it is captured (default: CPU count − 1, at most 8; `--workers`). A single Tesseract pass per page produces the text, word data and the page's searchable PDF.
 - **Streaming PDF assembly.** Page PDFs are merged with qpdf (pikepdf) in chunks of 200, so memory does not grow with the page count. Per-page intermediates are deleted afterwards unless `pdf.keep_page_pdfs: true`.
@@ -113,7 +113,7 @@ Measured on a 4-core Linux machine with a simulated reader, 1100×1430-pixel pag
 | 120 | 3 | 74 s | 1 s | 7 s | 83 s | 35 MB |
 | 300 | 3 | 249 s | 1 s | 7 s | 259 s | 88 MB |
 
-With 3 workers, OCR fully overlaps capture. With a real reader, capture time depends on the reader's rendering speed.
+With 3 workers, OCR fully overlaps capture. These are simulated-reader figures; with a real reader, capture time depends on the reader's rendering speed (see the Acrobat Reader figure above).
 
 Sizing guide. These are rough estimates; time a 50-page document on your reader and machine to get real numbers.
 
@@ -149,9 +149,24 @@ Per page, the runner does the following:
 3. If a frame is all black, still shows placeholder text, or never stabilises, it retries a bounded number of times. Retries are recorded.
 4. In `scroll` mode it scrolls down and stitches overlapping slices until the view stops moving, or until the page indicator shows the next page.
 5. It crops the frame to the page using the reader's canvas colour, saves `pages/page_NNNN.png`, and updates `manifest.json` atomically.
-6. It advances to the next page, verifies the move, and decides whether the document has ended (see [End-of-document detection](#end-of-document-detection)).
+6. It advances to the next page (see [How pages are turned](#how-pages-are-turned-acrobat)), verifies the move, and decides whether the document has ended (see [End-of-document detection](#end-of-document-detection)). After every page turn the view is **settled** first: any dialog or other window that appeared is handled or waited out, and the focus is taken back if another window took it. Only then is the view compared with the previous page, so a pop-up appearing or closing is never mistaken for a page turn.
 
 OCR runs after capture, then the searchable PDF is built. Both can also be run later with the `ocr` and `pdf` commands, on any OS.
+
+### How pages are turned (Acrobat)
+
+`viewer.navigate_by` chooses how the harness moves to the next page:
+
+| Value | How | Default for |
+|---|---|---|
+| `goto` | Go to page N+1 by number, through the reader's Go To Page dialog | `acrobat` profile |
+| `keys` | Press `keys.next_page` (for example `{RIGHT}`) | `pdfxchange`, `generic` |
+
+**Why not just press a key?** Keyboard focus can be stolen by Acrobat pop-ups, such as the "pin to taskbar" window, so a key press can go to the wrong window. A key press that is delivered late can also arrive together with the retry and move two pages. Going to a page by number is immune to both: a lost or repeated request still lands on the same page.
+
+**How `goto` works.** The harness presses **Ctrl+Shift+N** to open Acrobat's *Go To Page* dialog, writes the page number straight into the dialog's page box, and presses **OK** directly (a window message to the button, not a keystroke). No further keys are typed. A Go To Page dialog left open is cancelled by the built-in rule `acrobat-stray-go-to-page-dialog`.
+
+**Fallback.** `goto` is used only when the page count is known (`known_page_count`, or the count read from the Go To Page dialog, see [End-of-document detection](#end-of-document-detection)). Without a page count, or if the dialog cannot be used, the harness falls back to key presses.
 
 ### Searchable PDF ("merging back" into a PDF)
 
@@ -260,6 +275,7 @@ The full example is `config.example.yaml`. The most important keys:
 | `viewer.document_pane` | Win32 child window that renders pages (Acrobat: `AVL_AVView` / `AVPageView`). Find yours with `calibrate` |
 | `viewer.viewport_margins` | Fallback crop `[l, t, r, b]` of the client area when no pane matches |
 | `viewer.keys.*` | Navigation keys in pywinauto syntax (`^`=Ctrl, `+`=Shift, `%`=Alt, `{RIGHT}`, `{PGDN}`). `alt_next_page` keys are tried on retries |
+| `viewer.navigate_by` | `goto` (Acrobat default: next page by number through the Go To Page dialog) or `keys` (press `keys.next_page`). See [How pages are turned](#how-pages-are-turned-acrobat) |
 | `viewer.goto_method` | `dialog` (Acrobat `Ctrl+Shift+N`), `page_field`, `sequential`, or `manual`. Used when resuming |
 | `viewer.page_indicator` | Regexes for reading "3 / 12" from UI Automation, plus an optional OCR region fallback |
 | `capture.mode` | `fit_page` or `scroll` |
@@ -475,11 +491,17 @@ Informational flags:
 The first rule that applies wins:
 
 1. **`known_page_count`.** Capture stops after that page. If navigation stalls earlier, that is a **navigation failure** and triggers a manual checkpoint, never "the end". If the reader reports a different total, the disagreement is logged and shown in the report.
-2. **Reader-reported total.** When the page indicator reads "N / M", capture stops after page M. No key is pressed past the last page.
-3. **`max_pages`.** A safety cap, reported as possibly incomplete.
-4. **Heuristic stall.** "Next page" is retried with alternative keys. If neither the indicator nor the view changes:
+2. **The reader's own page count**, read once from the Go To Page dialog before capture starts (Acrobat: "Page: [ ] of N"; the dialog is then cancelled). Capture stops exactly after page N, and nothing is pressed past it. As with `known_page_count`, a stall before page N is a **navigation failure**, never "the end". It is not read when `known_page_count` is set.
+3. **Reader-reported total.** When the page indicator reads "N / M", capture stops after page M. No key is pressed past the last page. If both this and the dialog count are available, the indicator's live total is used.
+4. **`max_pages`.** A safety cap, reported as possibly incomplete.
+
+The remaining rule is a **fallback** for when no page count is available:
+
+5. **Heuristic stall.** "Next page" is retried with alternative keys. If neither the indicator nor the view changes:
    - With a readable indicator that is not at the total, this is a **failure**.
-   - Without an indicator, an **end probe** runs. It goes back one page (the view must change), then forward again (the view must return to the same image). Only if both hold is the end reported as `navigation_stalled_end_confirmed_by_probe`. Otherwise it is a failure, or `..._not_confirmed` for one-page documents and unresponsive readers.
+   - Without an indicator, an **end probe** runs. It goes back one page (the view must change), then forward again (the view must return to the same image). Only if both hold is the end reported as `navigation_stalled_end_confirmed_by_probe`. Otherwise it is a failure, or `..._not_confirmed` for one-page documents.
+
+   Without any page count, **unresponsive navigation is never taken as the end**: if "previous" has no effect either, it is a navigation failure, and in a batch the document is set aside as `needs_attention`.
 
 **Identical-looking pages.** Identical consecutive pages, such as blank separators or repeated forms, are accepted as distinct pages **only when the page indicator proves the reader advanced**. They get the flag `identical_to_previous_page`. Without an indicator, the harness cannot distinguish two such pages from the last page.
 
@@ -487,10 +509,10 @@ The first rule that applies wins:
 
 - With no indicator and no known count, identical trailing pages are indistinguishable from the end. The probe confirms that navigation works, not that no further pages exist. The report marks such runs as `end_is_uncertain` (exit code 2).
 - Without an indicator, a retried key press can overshoot when the first press advanced to an identical-looking page. Pages that advanced only on a retry are flagged `advance_after_retry_unverified`.
-- Wrappers that load pages lazily may change the reported total during the run. The harness re-reads it on every page, and `known_page_count` still wins.
+- Wrappers that load pages lazily may change the reported total during the run. The page indicator is re-read on every page, but the Go To Page dialog count is read only once, before capture. `known_page_count` still wins.
 - A reader in two-page or continuous layout can make "next" move by two pages or scroll part of a page. Overshoot is corrected once when the indicator shows it; otherwise use Single Page layout.
 
-**Recommendation:** supply `known_page_count` when you know it, and make sure `calibrate` shows a readable indicator.
+**Recommendation:** supply `known_page_count` when you know it. Otherwise check in the log (`page_count` event) that the reader's page count was read, or make sure `calibrate` shows a readable indicator.
 
 ---
 
@@ -502,6 +524,7 @@ The first rule that applies wins:
 | Document area | A Win32 child-window selector for the render pane, falling back to the client area minus configured margins, then cropped to the page by canvas colour |
 | Loading states | Frame-difference stability (N identical frames), the reader's busy signals (wait cursor, `IsHungAppWindow`, title regex), placeholder-text OCR, and a startup timeout that leads to a checkpoint. A small `min_wait_s` only covers the gap before the first repaint |
 | Dialogs and obstructions | Every viewer-process top-level dialog, and any other app's window above the reader that intersects the document area, is checked before and after each capture. A dialog that appears during a capture invalidates that capture |
+| Pop-ups during page turns | After every page turn the view is settled before it is judged: dialogs and other windows are handled or waited out and the focus is regained, then the view is observed again. A pop-up is never counted as a page turn |
 | Focus | The harness verifies the reader is in the foreground before each key press and refocuses it (restoring a minimised window). If that fails, it pauses at a checkpoint instead of typing into the wrong window. Acrobat also focuses the page pane, so arrow keys do not go to a toolbar box |
 | Hover artefacts | The mouse pointer is parked on the reader's title bar before captures |
 | Display scaling | The process is made per-monitor-DPI-aware (v2) before any GUI import, so window rectangles and captures are both in physical pixels. Monitor scale factors are recorded |
@@ -510,7 +533,7 @@ The first rule that applies wins:
 | Retries | Bounded retries for capture and navigation, with alternative keys on retries. Every retry is counted and its reason recorded |
 | Duplicates | A dHash comparison against all earlier pages flags `duplicate_of_other_page` (informational) |
 | Original document | SHA-256 before and after the run. Opened as a read-only copy by default. Resume refuses a changed document |
-| Resume | `manifest.json` is rewritten atomically after each page. `resume` continues at the first uncaptured page, navigates there (go-to dialog, page field, sequential, or manual), and verifies the position with the indicator. Without a readable indicator it asks you to confirm, except for sequential stepping, which is trusted by count |
+| Resume | `manifest.json` is rewritten atomically after each page. `resume` returns to the last captured page (go-to dialog, page field, sequential, or manual), verifies the position with the indicator or, without one, by comparing the view with that page's saved image, and then continues with the next page like a normal run. Without a readable indicator it asks you to confirm, except for sequential stepping, which is trusted by count |
 | Input | pywinauto `SendInput` first, pyautogui only as a fallback (counted in the report). Each input checks the emergency stop |
 | Diagnostics | On every failure or checkpoint: a screenshot of the reader window (or the whole desktop if `diagnostics_full_screen`), plus JSON with the rectangles, dialog list and indicator |
 
@@ -556,7 +579,7 @@ Checkpoints fire on:
 - **Scroll stitching** needs textured overlap. Long blank stretches make the overlap ambiguous (`stitch_overlap_uncertain`). Without a page indicator, scrolling past a page boundary in Single Page layout cannot be detected. Prefer `fit_page` mode, or ensure the indicator is readable.
 - **OCR quality** depends on on-screen resolution: zoom, monitor DPI and font rendering. Confidence values are Tesseract's word-level scores, not accuracy measurements. Compare against ground truth where accuracy matters.
 - **Security posture.** The harness never enables document JavaScript globally, never auto-dismisses unknown dialogs, and acts on security-looking dialogs only where your config explicitly says so. It does not circumvent capture exclusion or other protection. Whether automated capture is permitted for a given document is your responsibility.
-- **Not validated on real readers in this repository's CI.** The logic is tested end-to-end against a simulated reader (`tests/fakes.py`). The Windows adapter code needs to be validated on your reader version with `calibrate` before production use.
+- **Limited real-reader validation in this repository's CI.** The logic is tested end-to-end against a simulated reader (`tests/fakes.py`); the only real reader exercised is Acrobat Reader, in the on-demand benchmark (see [Testing](#testing)). The Windows adapter code needs to be validated on your reader version with `calibrate` before production use.
 
 ## Testing
 
@@ -572,3 +595,13 @@ The tests cover:
 - end-to-end simulated runs: indicator-driven ends, identical pages, the no-indicator end probe, known-page-count checkpoints, flaky navigation, the `max_pages` limit, dialogs, emergency stop with resume, refusal to resume a changed document, scroll-mode stitching, unattended abort, and real OCR when Tesseract is installed
 - scale and automation: batch processing (skip finished documents, retry ones set aside, mirrored outputs), the batch-wide STOP file, CSV inputs, a 600-page document with flat per-page cost, page records surviving a stale header, chunked PDF merging, page PDFs reused from the OCR pass, layout detection (continuous and zoomed), and the per-document time limit
 - searchable PDF output: text layer extraction, page size and metadata from the original, encrypted originals left encrypted, refusal to overwrite the original, writing next to the original with overwrite protection, placeholder pages, and the image-only fallback
+
+### Real Acrobat Reader benchmark
+
+`tools/acrobat_benchmark.py` measures capture speed with a real reader. It generates a text PDF (20 pages by default, opening in Single Page + Fit Page), captures it with the harness, and reports seconds per page taken from the harness's own log. It exits with code 1 if the average exceeds `--limit` (default 10 s) or the document was not captured completely.
+
+```powershell
+.venv\Scripts\python.exe tools\acrobat_benchmark.py C:\Temp\bench --pages 20
+```
+
+The `acrobat-benchmark` GitHub workflow (`.github/workflows/acrobat-benchmark.yml`, started manually) runs it on a Windows runner: it installs the harness with `install.ps1`, installs Adobe Acrobat Reader, pre-accepts its first-run prompts, captures the generated 20-page PDF, and uploads the benchmark results, logs and reports.
