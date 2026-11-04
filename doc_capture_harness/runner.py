@@ -582,6 +582,12 @@ class Harness:
             if dh:
                 self._hashes[n] = int(dh, 16)
         max_pages = self.cfg.document.max_pages
+        known, known_src = self._known_total(PageIndicator())
+        if known is not None and start > known:
+            # Every page of the document was captured in an earlier session.
+            event(self.log, "resume_position", f"all {known} page(s) were already captured; finishing")
+            self._end(EndReason.KNOWN_PAGE_COUNT, f"{known_src}={known} (already captured)", known)
+            return
         t_nav = time.monotonic()
         last_rec = self.manifest.page(start - 1) if start > 1 else None
         if last_rec and last_rec.get("status") == "captured":

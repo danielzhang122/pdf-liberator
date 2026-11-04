@@ -265,10 +265,9 @@ def test_resume_of_run_stopped_at_last_page_finishes_and_merges(doc, tmp_path):
     code, h, rep, v = run(cfg, sc, rd, resume=True)          # any checkpoint fails the test
     assert rep["end"]["reason"] == EndReason.KNOWN_PAGE_COUNT.value
     assert rep["status"] == "completed" and rep["pages_captured"] == 11
-    assert v.page == 10                                       # went straight to page 11 (0-based 10)
     assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
     log = (rd / "logs" / "harness.jsonl").read_text()
-    assert "returning to page 11" in log
+    assert "all 11 page(s) were already captured" in log      # nothing left to navigate to
 
 
 def test_popup_stealing_a_page_turn_is_not_mistaken_for_the_next_page(doc, tmp_path):
@@ -343,3 +342,55 @@ def test_goto_dialog_failing_twice_is_retried(doc, tmp_path):
     code, h, rep, v = run(cfg, sc, tmp_path / "r")
     assert code == EXIT_OK and _saved_pages_match(tmp_path / "r", pages) == list(range(1, 6))
     assert cfg.viewer.keys.next_page not in v.keys_sent
+
+
+def test_resume_with_every_page_already_captured_just_finishes(doc, tmp_path):
+    """Field case (v1.4.1, user's machine): 11 of 11 pages captured by an older version, the
+    page count read from the reader. No navigation is needed: finish and build the PDF."""
+    from pypdf import PdfReader
+    from doc_capture_harness.state import Manifest, RunPaths
+
+    pages = [make_page(i) for i in range(1, 12)]
+    rd = tmp_path / "r"
+    cfg = fast_config(doc, pdf={"enabled": True, "text_layer": False}, viewer={"goto_method": "dialog"})
+    run(cfg, Scenario(pages, indicator=False), rd)
+    m = Manifest.load(RunPaths(rd))
+    m.data.update(status="aborted", status_capture=None, end={"reason": "user_abort", "detail": "x", "last_page": 11})
+    for n in m.captured_pages():                       # images from an older version: hashes no longer match
+        rec = m.page(n)
+        rec["dhash"] = "0" * 64
+        m.set_page(n, rec)
+    m.data.pop("pdf", None)
+    m.save(include_pages=True)
+    sc = Scenario(pages, indicator=False, prev_broken=True, goto_dialog=True)
+    code, h, rep, v = run(cfg, sc, rd, resume=True)          # any checkpoint fails the test
+    assert rep["status"] == "completed" and rep["pages_captured"] == 11
+    assert len(PdfReader(rep["pdf"]["files"][0]).pages) == 11
+    assert "already captured" in (rd / "logs" / "harness.jsonl").read_text()
+    assert not v.keys_sent                                   # nothing was pressed in the reader
+
+
+def test_resume_trusts_a_successful_jump_by_number(doc, tmp_path):
+    """Resume mid-document where the saved image no longer matches (older version): the
+    go-to-page jump is trusted instead of stopping the document."""
+    from doc_capture_harness.state import Manifest, RunPaths
+
+    pages = [make_page(i) for i in range(1, 9)]
+    rd = tmp_path / "r"
+    cfg = fast_config(doc, viewer={"goto_method": "dialog", "navigate_by": "goto"})
+    stop_at = {"n": 5}
+
+    def stop(n):
+        if n == stop_at["n"]:
+            (rd / "STOP").write_text("x")
+
+    run(cfg, Scenario(pages, indicator=False, goto_dialog=True, on_page_shown=stop), rd)
+    m = Manifest.load(RunPaths(rd))
+    for n in m.captured_pages():
+        rec = m.page(n)
+        rec["dhash"] = "0" * 64
+        m.set_page(n, rec)
+    m.save(include_pages=True)
+    code, h, rep, v = run(cfg, Scenario(pages, indicator=False, goto_dialog=True), rd, resume=True)
+    assert rep["status"] == "completed" and rep["pages_captured"] == 8
+    assert "goto_trusted" in (rd / "logs" / "harness.jsonl").read_text()
