@@ -78,7 +78,8 @@ class Navigator:
             ind = self._ind(cur.indicator)
             changed = self._differs(prev.frame, cur.frame)
             event(self.log, "nav_attempt", page=page_no, attempt=attempt + 1, changed=changed,
-                  indicator=ind.raw, current=ind.current, total=ind.total, level=10)
+                  indicator=ind.raw, current=ind.current, total=ind.total, level=10,
+                  **self.adapter.focus_info())
             if prev_ind.readable and ind.readable:
                 if ind.current == prev_ind.current + 1:
                     flags = [] if changed else [Flag.IDENTICAL_PREV]
@@ -137,8 +138,9 @@ class Navigator:
                           attempts + 2, fwd.indicator, end_reason=EndReason.STALL_CONFIRMED)
 
     # ------------------------------------------------------------------ goto
-    def goto(self, n: int) -> tuple[bool, ViewState]:
-        """Navigate to page ``n`` (1-based). Returns (verified, state)."""
+    def goto(self, n: int, verify: Optional[Callable[[ViewState], bool]] = None) -> tuple[bool, ViewState]:
+        """Navigate to page ``n`` (1-based). Returns (verified, state). ``verify``
+        confirms the page without a readable page number (e.g. by its saved image)."""
         method = self.cfg.viewer.goto_method
         if n == 1:
             self._send(self.adapter.first_page)
@@ -167,6 +169,8 @@ class Navigator:
         ind = self._ind(st.indicator)
         if ind.readable:
             return ind.current == n, st
+        if verify is not None and verify(st):
+            return True, st
         # Cannot verify without an indicator.
         ans = self.checkpoint("verify_page",
                               f"The harness cannot read the page number. Confirm the reader shows page {n} "

@@ -84,6 +84,10 @@ class ViewerAdapter(abc.ABC):
         """
         return None
 
+    def focus_info(self) -> dict:
+        """Which window / UI element currently has keyboard focus (for diagnostics)."""
+        return {}
+
     def find_overlays(self, doc_rect: Optional[Rect]) -> list[str]:
         """Names of known reader UI elements drawn over the document area
         (``viewer.overlay_name_re``), e.g. Acrobat's AI Assistant bar."""

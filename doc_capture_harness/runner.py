@@ -127,6 +127,10 @@ class Harness:
                     info["indicator"] = {"current": ind.current, "total": ind.total, "raw": ind.raw}
                 except Exception as exc:
                     info["indicator_error"] = str(exc)
+                try:
+                    info["focus"] = self.adapter.focus_info()
+                except Exception as exc:
+                    info["focus_error"] = str(exc)
         except Exception as exc:
             info["capture_error"] = str(exc)
         try:
@@ -549,16 +553,33 @@ class Harness:
             dh = self.manifest.page(n).get("dhash")
             if dh:
                 self._hashes[n] = int(dh, 16)
-        if start > 1:
-            event(self.log, "resume_position", f"resuming at page {start}", page=start)
         max_pages = self.cfg.document.max_pages
         t_nav = time.monotonic()
-        ok, state = self._with_focus(lambda: self.navigator.goto(start))
-        if not ok:
-            self.checkpoint("goto_start", f"Could not verify the reader is on page {start}. "
-                                                f"Navigate to page {start} and choose Retry.")
-            state = self._observe()
-        nav_flags: list[str] = []
+        last_rec = self.manifest.page(start - 1) if start > 1 else None
+        if last_rec and last_rec.get("status") == "captured":
+            # Resume: return to the last captured page (recognised by its saved image when the
+            # page number is not readable) and move on from there exactly like a normal run, so
+            # a run that stopped at the last page simply finishes.
+            last = start - 1
+            event(self.log, "resume_position", f"resuming: returning to page {last} (last captured), "
+                  "then continuing", page=start)
+            ok, state = self._with_focus(lambda: self.navigator.goto(last, verify=lambda st: self._matches_saved(last, st)))
+            if not ok:
+                self.checkpoint("goto_start", f"Could not verify the reader is on page {last}. "
+                                              f"Navigate to page {last} and choose Retry.")
+                state = self._observe()
+            nav_flags = self._advance_from(last, state)
+            if nav_flags is None:
+                return
+        else:
+            if start > 1:
+                event(self.log, "resume_position", f"resuming at page {start}", page=start)
+            ok, state = self._with_focus(lambda: self.navigator.goto(start))
+            if not ok:
+                self.checkpoint("goto_start", f"Could not verify the reader is on page {start}. "
+                                              f"Navigate to page {start} and choose Retry.")
+                state = self._observe()
+            nav_flags = []
         page = start
         nav_s = time.monotonic() - t_nav
         t_loop, pages_done = time.monotonic(), 0
@@ -598,47 +619,68 @@ class Harness:
                   seconds=round(cycle, 2), **{f"{k}_s": round(v, 2) for k, v in part.items()})
             state = ViewState(cap.raw_frame if cap.raw_frame is not None else state.frame,
                               cap.indicator if cap.indicator.readable else state.indicator, True)
-            total, total_src = self._known_total(state.indicator)
-            if total is not None and page >= total:
-                self._end(EndReason.KNOWN_PAGE_COUNT if total_src == "known_page_count" else EndReason.INDICATOR_TOTAL,
-                          f"{total_src}={total}", page)
-                return
-            if page >= max_pages:
-                self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page)
-                return
             t_nav = time.monotonic()
-            outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
-            nav_flags = list(outcome.flags)
-            while outcome.status == NavStatus.FAILED:
-                self.save_diagnostics(f"page{page:04d}_nav_failed")
-                self._record_event("errors", {"type": "navigation_failed", "page": page, "detail": outcome.reason})
-                ans = self.checkpoint("navigation_failed",
-                                      f"Could not advance from page {page} to {page + 1}: {outcome.reason}.\n"
-                                      f"Navigate the reader to page {page + 1} yourself, then choose Retry to "
-                                      "verify it, Ignore to accept the current view as that page, or Abort.")
-                if ans == "skip":
-                    self._end(EndReason.NAVIGATION_FAILED, outcome.reason, page)
-                    return
-                cur = self._observe()
-                ind = self.navigator._ind(cur.indicator)
-                if ans == "continue":
-                    nav_flags = [Flag.MANUAL_OVERRIDE]
-                    if ind.readable and ind.current != page + 1:
-                        self.navigator.indicator_trusted = False
-                        event(self.log, "indicator_untrusted", "operator override contradicts indicator", level=30)
-                    break
-                prev_ind = self.navigator._ind(state.indicator)
-                if (ind.readable and prev_ind.readable and ind.current == page + 1) or \
-                        (not ind.readable and self.navigator._differs(state.frame, cur.frame)):
-                    nav_flags = [Flag.MANUAL_OVERRIDE]
-                    break
-                outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
-                nav_flags = list(outcome.flags)
-            if outcome.status == NavStatus.END:
-                self._end(outcome.end_reason or EndReason.STALL_UNCONFIRMED, outcome.reason, page)
+            nav_flags = self._advance_from(page, state)
+            if nav_flags is None:
                 return
             nav_s = time.monotonic() - t_nav
             page += 1
+
+    def _matches_saved(self, n: int, st: ViewState) -> bool:
+        """Does the current view show the page saved as page ``n`` (by image hash)?"""
+        rec = self.manifest.page(n) or {}
+        if not rec.get("dhash") or st.frame is None:
+            return False
+        cc = self.cfg.capture.crop
+        img = crop_to_page(st.frame, cc.canvas_tolerance, cc.padding, cc.min_page_fraction).image \
+            if cc.auto_page else st.frame
+        dist = hamming(dhash(img), int(rec["dhash"], 16))
+        event(self.log, "resume_verify", f"view vs saved page {n}: hash distance {dist}", level=10)
+        return dist <= 12
+
+    def _advance_from(self, page: int, state: ViewState) -> Optional[list[str]]:
+        """Move from ``page`` to ``page + 1``. Returns the navigation flags for the
+        next page, or None when the document has ended (the end is recorded)."""
+        max_pages = self.cfg.document.max_pages
+        total, total_src = self._known_total(state.indicator)
+        if total is not None and page >= total:
+            self._end(EndReason.KNOWN_PAGE_COUNT if total_src == "known_page_count" else EndReason.INDICATOR_TOTAL,
+                      f"{total_src}={total}", page)
+            return None
+        if page >= max_pages:
+            self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page)
+            return None
+        outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+        nav_flags = list(outcome.flags)
+        while outcome.status == NavStatus.FAILED:
+            self.save_diagnostics(f"page{page:04d}_nav_failed")
+            self._record_event("errors", {"type": "navigation_failed", "page": page, "detail": outcome.reason})
+            ans = self.checkpoint("navigation_failed",
+                                  f"Could not advance from page {page} to {page + 1}: {outcome.reason}.\n"
+                                  f"Navigate the reader to page {page + 1} yourself, then choose Retry to "
+                                  "verify it, Ignore to accept the current view as that page, or Abort.")
+            if ans == "skip":
+                self._end(EndReason.NAVIGATION_FAILED, outcome.reason, page)
+                return None
+            cur = self._observe()
+            ind = self.navigator._ind(cur.indicator)
+            if ans == "continue":
+                nav_flags = [Flag.MANUAL_OVERRIDE]
+                if ind.readable and ind.current != page + 1:
+                    self.navigator.indicator_trusted = False
+                    event(self.log, "indicator_untrusted", "operator override contradicts indicator", level=30)
+                break
+            prev_ind = self.navigator._ind(state.indicator)
+            if (ind.readable and prev_ind.readable and ind.current == page + 1) or \
+                    (not ind.readable and self.navigator._differs(state.frame, cur.frame)):
+                nav_flags = [Flag.MANUAL_OVERRIDE]
+                break
+            outcome = self.navigator.advance(page, state, total if total_src == "known_page_count" else None)
+            nav_flags = list(outcome.flags)
+        if outcome.status == NavStatus.END:
+            self._end(outcome.end_reason or EndReason.STALL_UNCONFIRMED, outcome.reason, page)
+            return None
+        return nav_flags
 
     # ================================================================== OCR
     def _orig(self):
