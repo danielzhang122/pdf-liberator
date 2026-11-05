@@ -2,8 +2,15 @@
 # Full list of options: config.example.yaml. Remove the leading "#" to enable a line.
 
 prompts:
-  # Pop-ups from other programs that cover the page are given this long to close
-  # on their own before the document is set aside.
+  # Unfamiliar dialogs and other programs' windows: "ignore" leaves them open
+  # (nothing is clicked) and keeps capturing; any page they cover is flagged
+  # "obstruction_detected" in the report so you can check it.
+  # Use "manual" to pause and ask instead, or "abort" to set the document aside.
+  unknown_action: ignore
+  obstruction_action: ignore
+
+  # Only used with obstruction_action: manual/abort - how long another program's
+  # pop-up gets to close on its own first.
   obstruction_wait_s: 30
 
   rules:

@@ -439,6 +439,13 @@ class Harness:
             img = res.frame
             last_raw = img
             ind = self._indicator()
+            if self.prompts.ignored_handles:
+                # An ignored dialog/window still open over the page: keep the capture, flag it.
+                covering = [d.title or d.class_name for d in self.adapter.list_dialogs(rect)
+                            if d.handle in self.prompts.ignored_handles and d.rect.intersects(rect)]
+                if covering:
+                    flags.append(Flag.OBSTRUCTED)
+                    info["covered_by"] = covering
             if not res.stable:
                 flags.append(Flag.UNSTABLE)
                 retry_reasons.append(Flag.UNSTABLE)

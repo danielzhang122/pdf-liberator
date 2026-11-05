@@ -377,3 +377,15 @@ def test_page_found_on_common_canvas_colours(canvas):
     vp.paste(make_page(1), (150, 60))
     l, t, r, b = crop_to_page(vp, padding=0).box
     assert abs(l - 150) <= 1 and abs(t - 60) <= 1 and abs(r - 750) <= 2 and abs(b - 840) <= 2
+
+
+def test_acrobat_toolbar_shadow_window_is_ignored():
+    """Field run (v1.4.2): the floating toolbar's untitled AVL_AVPopupShadow window was taken
+    for an unknown dialog and stopped all 9 documents."""
+    cfg = build_config({"viewer": {"profile": "acrobat"}})
+    shadow = DialogInfo(9, "", "AVL_AVPopupShadow", 1, Rect(0, 0, 50, 300), [], [], True)
+    ad = _DlgAdapter([shadow])
+    h = PromptHandler(cfg.prompts, ad, lambda r, m: (_ for _ in ()).throw(AssertionError(r)),
+                      EmergencyStopMonitor(None, None))
+    h.handle(None)
+    assert h.stats.handled[0]["action"] == "ignore"

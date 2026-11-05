@@ -63,6 +63,9 @@ class PromptHandler:
         self.log = get_logger()
         self.rule_counts: dict[str, int] = {}
         self.accepted_handles: set[int] = set()    # operator chose "continue" / rule says ignore
+        # Windows left alone because unknown_action / obstruction_action is "ignore";
+        # pages captured while one of them covers the page are flagged for review.
+        self.ignored_handles: set[int] = set()
         self.stats = PromptStats()
 
     def _note(self, d: DialogInfo, action: str, rule: Optional[str], **extra) -> None:
@@ -102,6 +105,12 @@ class PromptHandler:
                 return actions + int(waited)
             d = dialogs[0]
             rule = self._rule_for(d)
+            if not d.owned_by_viewer and rule is None and self.cfg.obstruction_action == "ignore":
+                self.accepted_handles.add(d.handle)
+                self.ignored_handles.add(d.handle)
+                self._note(d, "ignored_obstruction", None)
+                actions += 1
+                continue
             if not d.owned_by_viewer and rule is None:
                 # Another application's window over the page. Most are transient
                 # notifications: give it time to go away before involving anyone.
@@ -127,6 +136,12 @@ class PromptHandler:
             rounds += 1
             actions += 1
             if rule is None:
+                if self.cfg.unknown_action == "ignore":
+                    # Left open and untouched (nothing is clicked); capture continues.
+                    self.accepted_handles.add(d.handle)
+                    self.ignored_handles.add(d.handle)
+                    self._note(d, "ignored_unknown", None)
+                    continue
                 self._note(d, "unknown", None)
                 if self.cfg.unknown_action == "abort":
                     raise UserAbort(f"unknown dialog {d.title!r} (prompts.unknown_action=abort)")

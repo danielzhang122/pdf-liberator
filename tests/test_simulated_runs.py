@@ -394,3 +394,17 @@ def test_resume_trusts_a_successful_jump_by_number(doc, tmp_path):
     code, h, rep, v = run(cfg, Scenario(pages, indicator=False, goto_dialog=True), rd, resume=True)
     assert rep["status"] == "completed" and rep["pages_captured"] == 8
     assert "goto_trusted" in (rd / "logs" / "harness.jsonl").read_text()
+
+
+def test_ignore_mode_keeps_capturing_and_flags_covered_pages(doc, tmp_path):
+    """unknown_action / obstruction_action: ignore - nothing stops, nothing is clicked, and
+    pages captured while such a window covers the page are flagged for review."""
+    cfg = fast_config(doc, prompts={"unknown_action": "ignore", "obstruction_action": "ignore"})
+    sc = Scenario([make_page(i) for i in range(1, 6)], dialogs_on_page={
+        2: FakeDialog("Something new", ["?"], ["OK"], draw=True),                 # stays open
+        4: FakeDialog("NotifyView", ["note"], ["Open"], owned=False)})            # other program
+    code, h, rep, v = run(cfg, sc, tmp_path / "r")                                 # no checkpoint allowed
+    assert rep["status"] == "completed" and rep["pages_captured"] == 5
+    assert Flag.OBSTRUCTED not in rep["pages"][0]["flags"]
+    assert all(Flag.OBSTRUCTED in p["flags"] for p in rep["pages"][1:])
+    assert len(v.dialogs) == 2                                                     # nothing was dismissed

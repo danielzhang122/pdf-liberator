@@ -47,7 +47,7 @@ def make_pdf(path: Path, pages: int, secured: bool = False) -> None:
         # Opens without a password but is encrypted with copy/print/edit restrictions,
         # so Acrobat shows "(SECURED)" in the title bar, like the user's documents.
         w.encrypt(user_password="", owner_password="bench-owner-" + path.stem, permissions_flag=0,
-                  algorithm="AES-256")
+                  algorithm="RC4-128")   # built into pypdf (AES needs the cryptography package)
     with open(path, "wb") as f:
         w.write(f)
     tmp.unlink()
