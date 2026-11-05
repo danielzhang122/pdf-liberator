@@ -234,8 +234,11 @@ class PromptRule:
 
 @dataclass
 class PromptsConfig:
-    unknown_action: str = "manual"     # manual | abort  (never auto-dismiss)
-    obstruction_action: str = "manual"  # foreign window over document: manual | abort
+    # What to do with a dialog no rule knows: manual (ask) | abort (set the document
+    # aside) | ignore (leave it open, never click it, keep capturing; pages it covers
+    # are flagged for review). Unknown dialogs are never dismissed.
+    unknown_action: str = "manual"
+    obstruction_action: str = "manual"  # another program's window over the page: manual | abort | ignore
     obstruction_wait_s: float = 30.0    # let transient pop-ups from other apps disappear first
     security_text_re: list[str] = field(default_factory=lambda: list(DEFAULT_SECURITY_RE))
     rules: list[PromptRule] = field(default_factory=list)
@@ -415,9 +418,10 @@ def validate(cfg: HarnessConfig) -> None:
     check(cfg.viewer.navigate_by in ("keys", "goto"), "viewer.navigate_by must be keys or goto")
     check(cfg.viewer.goto_method in ("dialog", "page_field", "sequential", "manual"),
           "viewer.goto_method must be dialog, page_field, sequential or manual")
-    check(cfg.prompts.unknown_action in ("manual", "abort"),
-          "prompts.unknown_action must be manual or abort (unknown prompts are never auto-dismissed)")
-    check(cfg.prompts.obstruction_action in ("manual", "abort"), "prompts.obstruction_action must be manual or abort")
+    check(cfg.prompts.unknown_action in ("manual", "abort", "ignore"),
+          "prompts.unknown_action must be manual, abort or ignore (unknown prompts are never auto-dismissed)")
+    check(cfg.prompts.obstruction_action in ("manual", "abort", "ignore"),
+          "prompts.obstruction_action must be manual, abort or ignore")
     check(cfg.manual.mode in ("messagebox", "console", "abort"), "manual.mode must be messagebox, console or abort")
     check(cfg.document.max_pages >= 1, "document.max_pages must be >= 1")
     check(cfg.document.start_page >= 1, "document.start_page must be >= 1")

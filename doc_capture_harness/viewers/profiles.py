@@ -24,7 +24,7 @@ _SAVE_CHANGES_NO = {
 # when they float over the grey canvas the page crop leaves them out.
 _ACROBAT_TOOLBARS = {
     "name": "acrobat-floating-toolbars",
-    "class_re": r"^AVL_AVPopup$",
+    "class_re": r"^AVL_AVPopup(Shadow)?$",     # the toolbar and its drop-shadow window
     "title_re": r"^$",
     "action": "ignore",
 }
