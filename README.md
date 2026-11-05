@@ -2,6 +2,8 @@
 
 A Windows test harness that opens a document in a **desktop PDF reader** (Adobe Acrobat / Acrobat Reader, PDF-XChange, or a generic configured reader), captures every rendered page as PNG, runs **Tesseract OCR** locally, and writes a **verification report**.
 
+Its a brute-force approach to making a protected PDF accessible to multiple users
+
 It also assembles the captures into a **searchable PDF**: each page is the captured image with an invisible OCR text layer, sized like the original's pages. The original file is never modified.
 
 It is meant for documents whose real content only appears after the reader runs a viewer-specific wrapper or document JavaScript, so a PDF library sees only a placeholder page.
