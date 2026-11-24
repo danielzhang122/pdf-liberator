@@ -214,13 +214,20 @@ class Win32ViewerAdapter(ViewerAdapter):
     _TRANSIENT_CLASSES = ("AcrobatTaskbarPinWnd",)     # Acrobat's own pop-up strip, not a focus thief
 
     def foreground_is_transient(self) -> bool:
+        # The pin pop-up lives in a separate Acrobat process, so match the reader's exe name, not its pid.
         fg = pw.foreground_window()
-        return bool(fg) and pw.get_class_name(fg) in self._TRANSIENT_CLASSES and pw.window_pid(fg) == self.pid
+        if not fg or pw.get_class_name(fg) not in self._TRANSIENT_CLASSES:
+            return False
+        exe = os.path.basename(pw.process_image_name(pw.window_pid(fg))).lower()
+        return exe in {n.lower() for n in self.cfg.process_names}
 
     def bring_to_foreground(self) -> bool:
         self.estop.check()
         if self.cfg.background:
             return True
+        if self.foreground_is_transient():
+            # Acrobat's "pin to taskbar" pop-up keeps taking the focus back until it is closed.
+            pw.post_message(pw.foreground_window(), 0x0010)     # WM_CLOSE
         if pw.is_minimized(self.hwnd):
             pw.restore_window(self.hwnd)
         try:
