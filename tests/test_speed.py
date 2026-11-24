@@ -1,7 +1,9 @@
 """Per-page speed: expensive UI lookups are cached, waits are bounded."""
 import json
+import sys
 import time
 
+import pytest
 from PIL import Image, ImageDraw
 
 from conftest import fast_config
@@ -82,6 +84,7 @@ def test_default_timings_capture_pages_well_under_10_seconds(doc, tmp_path):
     print(f"{per_page:.2f} s/page with default timings")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="win32 adapter imports Windows-only code")
 def test_acrobat_taskbar_pin_is_not_a_focus_steal(monkeypatch):
     """Acrobat's own taskbar pin pop-up holding the foreground is not another program taking focus."""
     from doc_capture_harness.viewers import win32 as w32
