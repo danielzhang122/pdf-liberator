@@ -89,10 +89,12 @@ def test_acrobat_taskbar_pin_is_not_a_focus_steal(monkeypatch):
     """Acrobat's own taskbar pin pop-up holding the foreground is not another program taking focus."""
     from doc_capture_harness.viewers import win32 as w32
     ad = w32.Win32ViewerAdapter.__new__(w32.Win32ViewerAdapter)
-    ad.pid = 5940
+    ad.pid = 4164
+    ad.cfg = type("C", (), {"process_names": ["Acrobat.exe", "AcroRd32.exe"]})()
     monkeypatch.setattr(w32.pw, "foreground_window", lambda: 197320)
     monkeypatch.setattr(w32.pw, "get_class_name", lambda h: "AcrobatTaskbarPinWnd")
-    monkeypatch.setattr(w32.pw, "window_pid", lambda h: 5940)
+    monkeypatch.setattr(w32.pw, "window_pid", lambda h: 956)       # a second Acrobat process (seen in CI)
+    monkeypatch.setattr(w32.pw, "process_image_name", lambda pid: "C:/Program Files/Adobe/Acrobat.exe")
     assert ad.foreground_is_transient()
-    monkeypatch.setattr(w32.pw, "window_pid", lambda h: 1234)      # a different process: a real steal
-    assert not ad.foreground_is_transient()
+    monkeypatch.setattr(w32.pw, "process_image_name", lambda pid: "C:/Windows/notepad.exe")
+    assert not ad.foreground_is_transient()                         # another program: a real steal
