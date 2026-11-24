@@ -97,3 +97,26 @@ def test_set_window_text_into_another_process(notepad):
     assert pw.set_window_text(edit, "Page 7 of 12")
     notepad._indicator_cache.reset()
     assert notepad.read_page_indicator().current == 7
+
+
+def test_background_posted_keys_without_focus(notepad):
+    """Background mode: keys posted to the window reach it while another window has
+    the focus, the focus never moves, and PrintWindow still captures it."""
+    from doc_capture_harness import platform_win as pw
+
+    edit = _edit_hwnd(pw, notepad.hwnd)
+    if edit is None:
+        pytest.skip("this Notepad has no Win32 edit control")
+    notepad.cfg.background = True
+    notepad._pane_hwnd = edit
+    notepad.cfg.document_pane.class_name = pw.get_class_name(edit)
+    fg = pw.foreground_window()
+    notepad.send_keys("{END}{BACKSPACE}{BACKSPACE}20")
+    time.sleep(0.5)
+    assert pw.foreground_window() == fg
+    assert notepad.is_foreground()
+    import ctypes
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.SendMessageW(edit, 0x000D, 256, buf)   # WM_GETTEXT
+    assert buf.value.endswith("of 20"), buf.value               # the posted keys edited the text
+    assert notepad.grab_window() is not None

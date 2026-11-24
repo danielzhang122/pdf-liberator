@@ -389,3 +389,15 @@ def test_acrobat_toolbar_shadow_window_is_ignored():
                       EmergencyStopMonitor(None, None))
     h.handle(None)
     assert h.stats.handled[0]["action"] == "ignore"
+
+
+def test_background_key_events_and_config():
+    from doc_capture_harness.config import build_config
+    from doc_capture_harness.inputs import key_events
+
+    assert key_events("{RIGHT}") == [(True, 0x27), (False, 0x27)]
+    assert key_events("^{PGDN}") == [(True, 0x11), (True, 0x22), (False, 0x22), (False, 0x11)]
+    assert key_events("{DOWN 2}") == [(True, 0x28), (False, 0x28)] * 2
+    cfg = build_config({"capture": {"background": True}})
+    assert cfg.capture.method == "printwindow" and cfg.viewer.background
+    assert not build_config({}).viewer.background

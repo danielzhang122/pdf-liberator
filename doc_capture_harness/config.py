@@ -96,6 +96,7 @@ class ViewerConfig:
     # number in the go-to-page dialog (immune to lost, delayed or doubled key presses);
     # "keys" presses keys.next_page. Without a known page count, keys are always used.
     navigate_by: str = "keys"
+    background: bool = False   # set from capture.background by build_config
     goto_dialog_title_re: Optional[str] = None
     page_indicator: IndicatorConfig = field(default_factory=IndicatorConfig)
     busy: BusyConfig = field(default_factory=BusyConfig)
@@ -143,6 +144,9 @@ class CropConfig:
 @dataclass
 class CaptureConfig:
     method: str = "screen"           # screen | printwindow
+    # Post keys to the reader's window and capture with PrintWindow, so the PC stays
+    # usable during a capture (forces method: printwindow, never takes the focus).
+    background: bool = False
     mode: str = "fit_page"           # fit_page | scroll
     stability: StabilityConfig = field(default_factory=StabilityConfig)
     scroll: ScrollConfig = field(default_factory=ScrollConfig)
@@ -399,6 +403,9 @@ def build_config(raw: dict) -> HarnessConfig:
     raw["viewer"].pop("_prompt_rules", None)
     raw["prompts"]["rules"] = list(raw["prompts"].get("rules") or []) + list(profile_rules)
     cfg = _build(HarnessConfig, raw, "config")
+    if cfg.capture.background:
+        cfg.capture.method = "printwindow"
+        cfg.viewer.background = True
     validate(cfg)
     return cfg
 

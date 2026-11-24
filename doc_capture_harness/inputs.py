@@ -43,6 +43,26 @@ def pywinauto_to_pyautogui(keys: str) -> list[tuple[list[str], str, int]]:
     return out
 
 
+_VK = {"right": 0x27, "left": 0x25, "up": 0x26, "down": 0x28, "pagedown": 0x22, "pageup": 0x21,
+       "home": 0x24, "end": 0x23, "enter": 0x0D, "tab": 0x09, "esc": 0x1B, "space": 0x20,
+       "backspace": 0x08, "delete": 0x2E, "ctrl": 0x11, "shift": 0x10, "alt": 0x12,
+       **{f"f{i}": 0x6F + i for i in range(1, 25)}}
+_EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E}
+
+
+def key_events(keys: str) -> list[tuple[bool, int]]:
+    """pywinauto key syntax -> ordered (is_down, virtual-key) events for PostMessage."""
+    out = []
+    for mods, key, repeat in pywinauto_to_pyautogui(keys):
+        vk = _VK.get(key) or (ord(key.upper()) if len(key) == 1 and key.isalnum() else None)
+        if vk is None:
+            raise ValueError(f"key {key!r} cannot be posted in background mode")
+        mvks = [_VK[m] for m in mods]
+        for _ in range(repeat):
+            out += [(True, m) for m in mvks] + [(True, vk), (False, vk)] + [(False, m) for m in reversed(mvks)]
+    return out
+
+
 class InputDriver:
     def __init__(self, estop: EmergencyStopMonitor, allow_fallback: bool = True, failsafe: bool = True):
         self.estop = estop
@@ -81,6 +101,27 @@ class InputDriver:
         except pyautogui.FailSafeException:
             self.estop.trigger("pyautogui fail-safe (mouse moved to a screen corner)")
             self.estop.check()
+
+    def post_keys(self, hwnd: int, keys: str) -> None:
+        """Post WM_KEYDOWN/WM_KEYUP to ``hwnd``: no focus change, no global input.
+        shortcut: modifiers are posted as messages only, so readers that check
+        GetKeyState (e.g. for Ctrl+0) see no Ctrl; use plain keys in background mode."""
+        from . import platform_win as pw
+        import ctypes
+        for down, vk in key_events(keys):
+            self.estop.check()
+            scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
+            lp = 1 | (scan << 16) | ((1 << 24) if vk in _EXTENDED else 0) | (0 if down else 0xC0000000)
+            pw.post_message(hwnd, 0x0100 if down else 0x0101, vk, lp)
+            self.estop.sleep(0.02)
+
+    def post_wheel(self, hwnd: int, x: int, y: int, wheel_dist: int) -> None:
+        """WM_MOUSEWHEEL to ``hwnd`` at screen point (x, y), without moving the cursor."""
+        from . import platform_win as pw
+        self.estop.check()
+        wp = ((int(wheel_dist) * 120) & 0xFFFF) << 16
+        lp = ((int(y) & 0xFFFF) << 16) | (int(x) & 0xFFFF)
+        pw.post_message(hwnd, 0x020A, wp, lp)
 
     def scroll(self, x: int, y: int, wheel_dist: int) -> None:
         self.estop.check()

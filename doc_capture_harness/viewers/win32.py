@@ -206,11 +206,15 @@ class Win32ViewerAdapter(ViewerAdapter):
         return pw.get_client_rect_screen(self.hwnd).inset(*m)
 
     def is_foreground(self) -> bool:
+        if self.cfg.background:
+            return True                      # background mode never needs (or takes) the focus
         fg = pw.foreground_window()
         return fg == self.hwnd or pw.root_owner(fg) == self.hwnd
 
     def bring_to_foreground(self) -> bool:
         self.estop.check()
+        if self.cfg.background:
+            return True
         if pw.is_minimized(self.hwnd):
             pw.restore_window(self.hwnd)
         try:
@@ -338,6 +342,8 @@ class Win32ViewerAdapter(ViewerAdapter):
         return found
 
     def park_cursor(self) -> None:
+        if self.cfg.background:
+            return
         wr = self.window_rect()
         dr = self.document_rect()
         # Title bar of the viewer window: inside the viewer (so a busy cursor is
@@ -606,6 +612,9 @@ class Win32ViewerAdapter(ViewerAdapter):
 
     def send_dialog_keys(self, dialog: DialogInfo, keys: str) -> bool:
         self.estop.check()
+        if self.cfg.background:
+            self.inputs.post_keys(dialog.handle, keys)
+            return True
         try:
             from pywinauto import Desktop
             Desktop(backend="uia").window(handle=dialog.handle).wrapper_object().set_focus()
@@ -629,6 +638,8 @@ class Win32ViewerAdapter(ViewerAdapter):
             raise FocusLost("viewer window could not be brought to the foreground")
 
     def focus_document(self) -> None:
+        if self.cfg.background:
+            return
         self._ensure_focus()
         if self._pane_hwnd:
             try:
@@ -643,11 +654,22 @@ class Win32ViewerAdapter(ViewerAdapter):
             # Left edge of the viewport is canvas in fit-page view (no links/forms).
             self.inputs.click(dr.left + 6, dr.center[1])
 
+    def _key_target(self) -> int:
+        self.document_rect()                 # refreshes _pane_hwnd
+        return self._pane_hwnd or self.hwnd
+
     def send_keys(self, keys: str) -> None:
+        if self.cfg.background:
+            self.inputs.post_keys(self._key_target(), keys)
+            return
         self._ensure_focus()
         self.inputs.send_keys(keys)
 
     def wheel(self, notches: int) -> None:
+        if self.cfg.background:
+            x, y = self.document_rect().center
+            self.inputs.post_wheel(self._key_target(), x, y, notches)
+            return
         self._ensure_focus()
         x, y = self.document_rect().center
         self.inputs.scroll(x, y, notches)
@@ -729,6 +751,8 @@ class Win32ViewerAdapter(ViewerAdapter):
         return False
 
     def enter_page_number(self, n: int) -> bool:
+        if self.cfg.background:
+            return False                     # needs UIA SetFocus + a real Enter; use goto_method: dialog
         edits = [el for ct, el in (self._indicator_cache.get() or []) if ct == "Edit"]
         if not edits:
             return False

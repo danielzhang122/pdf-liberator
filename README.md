@@ -96,6 +96,11 @@ python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be
 - **Time limit:** `--time-limit 240` stops a document whose capture runs over 240 minutes (resumable), so one stuck document cannot hold up the batch.
 - **Options for every document:** `--config my.yaml` applies a configuration to every document. Also available: `--lang eng+deu`, `--workers N`, `--max-pages N`, `--no-pdf`.
 
+## Watching progress and using the PC meanwhile
+
+- **Progress page:** in a second window run `python -m doc_capture_harness dashboard <run or output folder>`. A browser page shows captured / expected pages, OCR progress and pages needing review for every run under that folder, refreshing every 2 s (localhost only, read-only).
+- **Background mode:** add `--background` (or `capture.background: true`) to capture the reader window with PrintWindow and send navigation keys straight to it, so the harness never takes focus or moves the mouse. Keep the reader window open (not minimized). Limits: modifier shortcuts (e.g. Ctrl+0) may be ignored, page-box navigation is off (use `goto_method: dialog`), PDF-XChange may ignore posted keys, and GPU-rendered readers can produce black frames. Not yet verified on Acrobat or PDF-XChange.
+
 ## Large documents
 
 Capture is sequential: one reader on one screen. With real Acrobat Reader, the CI benchmark ([Testing](#testing)) measured about **1.9–2.5 s per page** in steady state (20-page document, 1024×768 Windows runner). Everything else is built so that cost per page stays flat for documents with thousands of pages:

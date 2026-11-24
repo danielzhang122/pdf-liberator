@@ -46,6 +46,7 @@ viewer:
 
 capture:
   method: screen             # screen (mss) | printwindow (works while covered; may be black for GPU-rendered views)
+  background: false          # true: keep using the PC during a capture (posted keys + printwindow; no focus or cursor use)
   mode: fit_page             # fit_page | scroll (fit width + overlapping slices for tall pages)
   stability:
     interval_s: 0.25

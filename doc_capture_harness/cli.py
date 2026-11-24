@@ -75,6 +75,8 @@ def _apply_overrides(raw: dict, args) -> dict:
         raw.setdefault("manual", {})["mode"] = args.manual
     if getattr(args, "mode", None):
         raw.setdefault("capture", {})["mode"] = args.mode
+    if getattr(args, "background", False):
+        raw.setdefault("capture", {})["background"] = True
     if getattr(args, "lang", None):
         raw.setdefault("ocr", {})["lang"] = args.lang
     if getattr(args, "workers", None):
@@ -370,6 +372,13 @@ def cmd_batch(args) -> int:
     return batch.run()
 
 
+def cmd_dashboard(args) -> int:
+    from .dashboard import serve
+
+    serve(Path(args.folder), args.port, not args.no_browser)
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from .doctor import run_doctor
     raw = load_raw(_config_path(args))
@@ -403,6 +412,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-pages", type=int, help="override document.max_pages")
         sp.add_argument("--attach", action="store_true", help="attach to an already-open reader window")
         sp.add_argument("--manual", choices=["messagebox", "console", "abort"], help="manual checkpoint mode")
+        sp.add_argument("--background", action="store_true",
+                        help="keep using the PC: capture the reader window without focus, keys or mouse")
         sp.add_argument("--mode", choices=["fit_page", "scroll"], help="override capture.mode")
         sp.add_argument("--lang", help="override ocr.lang (e.g. eng+deu)")
         sp.add_argument("--workers", type=int, help="parallel OCR processes (default: CPU count - 1)")
@@ -474,6 +485,12 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--no-prompt", action="store_true",
                    help="do not wait for Enter before starting (scheduled/remote runs)")
     b.set_defaults(func=cmd_batch)
+
+    db = sub.add_parser("dashboard", help="open a live progress page in the browser (run in a second window)")
+    db.add_argument("folder", help="a run directory, or an output folder holding several runs")
+    db.add_argument("--port", type=int, default=8765)
+    db.add_argument("--no-browser", action="store_true", help="only print the URL")
+    db.set_defaults(func=cmd_dashboard)
 
     dr = sub.add_parser("doctor", help="check that this machine is ready (Python packages, Tesseract, reader, display)")
     dr.add_argument("--config", "-c")
