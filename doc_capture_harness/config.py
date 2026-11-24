@@ -115,6 +115,7 @@ class ViewerConfig:
 @dataclass
 class StabilityConfig:
     interval_s: float = 0.25
+    fast_interval_s: float = 0.05          # poll gap while the view is still changing, and before a confirm
     required_stable_frames: int = 3
     pixel_threshold: int = 10              # per-pixel grey difference that counts as change
     changed_fraction_threshold: float = 0.0008
@@ -204,7 +205,7 @@ class PdfConfig:
     copy_metadata: bool = True           # title/author/... from the original, if readable
     output_path: Optional[str] = None    # explicit output file (batch mode sets this)
     keep_page_pdfs: bool = False         # keep ocr/pdf/page_NNNN.pdf after merging (faster rebuilds)
-    verify_sample_pages: int = 60        # text-layer check on this many pages (all, if fewer)
+    verify_sample_pages: int = 12        # text-layer check on this many pages (all, if fewer); pypdf needs ~0.15 s/page
 
 
 # --------------------------------------------------------------------------- prompts

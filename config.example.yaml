@@ -50,6 +50,7 @@ capture:
   mode: fit_page             # fit_page | scroll (fit width + overlapping slices for tall pages)
   stability:
     interval_s: 0.25
+    fast_interval_s: 0.05          # poll gap while the page is still drawing
     required_stable_frames: 3
     pixel_threshold: 10
     changed_fraction_threshold: 0.0008
@@ -104,7 +105,7 @@ pdf:
   missing_pages: placeholder     # placeholder keeps page numbering aligned | skip
   copy_metadata: true
   keep_page_pdfs: false          # keep per-page PDFs after merging (faster rebuilds, more disk)
-  verify_sample_pages: 60        # text-layer check on this many pages (all pages if fewer)
+  verify_sample_pages: 12        # text-layer check on this many pages (all pages if fewer)
 
 prompts:
   unknown_action: manual     # manual | abort  (unknown dialogs are never dismissed)

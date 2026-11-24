@@ -211,6 +211,12 @@ class Win32ViewerAdapter(ViewerAdapter):
         fg = pw.foreground_window()
         return fg == self.hwnd or pw.root_owner(fg) == self.hwnd
 
+    _TRANSIENT_CLASSES = ("AcrobatTaskbarPinWnd",)     # Acrobat's own pop-up strip, not a focus thief
+
+    def foreground_is_transient(self) -> bool:
+        fg = pw.foreground_window()
+        return bool(fg) and pw.get_class_name(fg) in self._TRANSIENT_CLASSES and pw.window_pid(fg) == self.pid
+
     def bring_to_foreground(self) -> bool:
         self.estop.check()
         if self.cfg.background:
@@ -702,7 +708,14 @@ class Win32ViewerAdapter(ViewerAdapter):
         if not self.cfg.keys.goto_page or not self.cfg.goto_dialog_title_re:
             return False
         self.send_keys(self.cfg.keys.goto_page)
-        dlg = self._wait_goto_dialog()
+        dlg = self._wait_goto_dialog(timeout_s=1.5)
+        if dlg is None:
+            # The shortcut most likely went to another window that held the focus: take the
+            # focus back and press it once more, rather than waiting out the whole timeout.
+            self.close_stray_goto_dialogs()
+            self.bring_to_foreground()
+            self.send_keys(self.cfg.keys.goto_page)
+            dlg = self._wait_goto_dialog(timeout_s=2.5)
         if dlg is None:
             return False
         kids = pw.child_windows(dlg.handle)

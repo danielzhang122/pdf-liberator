@@ -64,6 +64,11 @@ class ViewerAdapter(abc.ABC):
     @abc.abstractmethod
     def bring_to_foreground(self) -> bool: ...
 
+    def foreground_is_transient(self) -> bool:
+        """True when the foreground is a short-lived window of the viewer itself (for example
+        Acrobat's taskbar pin): not another program taking the focus."""
+        return False
+
     @abc.abstractmethod
     def is_busy(self) -> Optional[bool]: ...
 

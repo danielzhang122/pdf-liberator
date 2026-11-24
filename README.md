@@ -108,7 +108,7 @@ Capture is sequential: one reader on one screen. With real Acrobat Reader, the C
 - **Parallel OCR while capturing.** Each page goes to a pool of Tesseract processes as soon as it is captured (default: CPU count − 1, at most 8; `--workers`). A single Tesseract pass per page produces the text, word data and the page's searchable PDF.
 - **Streaming PDF assembly.** Page PDFs are merged with qpdf (pikepdf) in chunks of 200, so memory does not grow with the page count. Per-page intermediates are deleted afterwards unless `pdf.keep_page_pdfs: true`.
 - **Constant-cost state.** Every page is saved as its own small record (`records/page_NNNN.json`). The run summary is rewritten at most every 5 s, not after every page. A crash loses no captured page, and `resume` continues from the next page.
-- **Verification sampling.** The PDF text-layer check covers 60 evenly spaced pages (`pdf.verify_sample_pages`), plus an exact page count.
+- **Verification sampling.** The PDF text-layer check covers 12 evenly spaced pages (`pdf.verify_sample_pages`), plus an exact page count.
 
 **Per-page console line.** Every captured page prints where its time went, for example `page 12/240 captured in 2.8s [render wait 1.6, dialog checks 0.1, page number 0.0, keys/other 1.1]`. Searches of the reader's interface (page number box, dialog contents) run once and are cached, never on every page. The page-number search skips the document content, and a failed search is retried at most once a minute. OCR processes run at below-normal priority, so they never slow the reader down.
 
@@ -125,7 +125,7 @@ With 3 workers, OCR fully overlaps capture. These are simulated-reader figures; 
 Sizing guide. These are rough estimates; time a 50-page document on your reader and machine to get real numbers.
 
 - **Disk:** plan for about 1–2 MB per page in the run folder (PNG captures; per-page PDFs are deleted after merging) and 0.3–1 MB per page for the searchable PDF, depending on the page content. `pdf.image_format: jpeg` makes the PDF several times smaller. `doctor --out-dir D:\OCR` checks free space.
-- **Time:** capture is bounded by the stability check (`min_wait_s` + 3 × `interval_s` ≈ 1 s with the defaults) plus the reader's own rendering time. On a machine with enough cores for OCR to keep up, little work remains after the last page.
+- **Time:** capture is bounded by the stability check (`min_wait_s` + 3 frames: polled every `fast_interval_s` while the page is drawing, then every `interval_s` once frames agree, about 0.9 s with the defaults), done once per page, plus the reader's own rendering time. OCR uses one process per CPU core at below-normal priority, so little work remains after the last page.
 - **Limits:** `document.max_pages` defaults to 5000 per document. Raise it in a config file, or use `--max-pages`, for longer documents.
 
 ## How it works

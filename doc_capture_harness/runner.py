@@ -33,7 +33,7 @@ from .models import EndReason, Flag, NavStatus, PageIndicator, Rect
 from .navigation import Navigator, ViewState
 from .ocr_pipeline import OcrPipeline
 from .prompts import PromptHandler
-from .stability import wait_for_stable
+from .stability import StabilityResult, confirm_stable, wait_for_stable
 from .state import Manifest, RunPaths, atomic_write_json, now_iso, sha256_file
 from .viewers.base import CaptureSource, ViewerAdapter
 
@@ -86,6 +86,7 @@ class Harness:
         self._first_checkpoint_done = False
         self._timers: dict[str, float] = collections.defaultdict(float)
         self._page_region = None
+        self._last_view: Optional[ViewState] = None   # view after the latest observe (navigation)
         self._page_count_hint: Optional[int] = None
         self._placeholder_ocr_ok: Optional[bool] = None
 
@@ -237,13 +238,23 @@ class Harness:
             l, t, r, b = box
             self._page_region = ((l - 12, t - 12, r + 12, b + 12), tuple(view_size))
 
-    def _stable(self, rect: Optional[Rect] = None, timeout: Optional[float] = None):
+    def _stable(self, rect: Optional[Rect] = None, timeout: Optional[float] = None,
+                expect: Optional[Image.Image] = None):
+        """Wait for the view to stop changing. ``expect`` is a frame already seen stable
+        (the view after the last key press): if one fresh frame still matches it, no full
+        wait is needed."""
         rect = rect or self._doc_rect()
         self.adapter.park_cursor()
         region = None
         if self._page_region and self._page_region[1] == (rect.width, rect.height):
             region = self._page_region[0]
         with self._timed("render_wait"):
+            if expect is not None:
+                t0 = time.monotonic()
+                img = confirm_stable(expect, lambda: self.source.grab(rect), self.cfg.capture.stability,
+                                     sleep=self._sleep, is_busy=self.adapter.is_busy, region=region)
+                if img is not None:
+                    return StabilityResult(True, img, 2, time.monotonic() - t0, False, 0.0)
             return wait_for_stable(lambda: self.source.grab(rect), self.cfg.capture.stability,
                                    sleep=self._sleep, is_busy=self.adapter.is_busy, timeout_s=timeout,
                                    region=region)
@@ -259,7 +270,8 @@ class Harness:
     def _observe(self) -> ViewState:
         res = self._stable()
         ind = self._indicator()
-        return ViewState(res.frame, ind, res.stable)
+        self._last_view = ViewState(res.frame, ind, res.stable)
+        return self._last_view
 
     def _settle(self) -> bool:
         """Deal with anything that appeared after a key press (dialogs, other windows over
@@ -267,7 +279,7 @@ class Harness:
         a window over the page was dealt with); regaining focus alone does not count."""
         intervened = bool(self._dialogs(self._safe_doc_rect()))
         try:
-            if not self.adapter.is_foreground():
+            if not self.adapter.is_foreground() and not self.adapter.foreground_is_transient():
                 event(self.log, "focus_stolen", "another window took the focus; taking it back", level=30,
                       **self.adapter.focus_info())
                 self.adapter.bring_to_foreground()
@@ -415,7 +427,9 @@ class Harness:
             return None
 
     # ================================================================== capture
-    def _capture_page(self, page_no: int) -> PageCapture:
+    def _capture_page(self, page_no: int, observed: Optional[ViewState] = None) -> PageCapture:
+        """Capture the page. ``observed`` is the view the navigation step already waited on
+        and checked for dialogs; it is only trusted for the first attempt."""
         c = self.cfg.capture
         retry_reasons: list[str] = []
         last_img, last_raw, flags, info = None, None, [], {}
@@ -425,12 +439,13 @@ class Harness:
             attempts = attempt
             self.estop.check()
             flags = []
-            if self._dialogs(self._safe_doc_rect()):
+            expect = observed if attempt == 1 and observed is not None and observed.stable else None
+            if expect is None and self._dialogs(self._safe_doc_rect()):
                 self._sleep(0.3)
             rect = self._doc_rect()
             self._check_rect_on_screen(rect)
             t0 = time.monotonic()
-            res = self._stable(rect)
+            res = self._stable(rect, expect=expect.frame if expect is not None else None)
             info = {"stability_s": round(res.elapsed_s, 3), "frames": res.frames,
                     "busy_seen": res.busy_seen, "document_rect": rect.to_dict()}
             if self._dialogs(rect):              # a dialog popped up during capture
@@ -438,7 +453,7 @@ class Harness:
                 continue
             img = res.frame
             last_raw = img
-            ind = self._indicator()
+            ind = expect.indicator if expect is not None else self._indicator()
             if self.prompts.ignored_handles:
                 # An ignored dialog/window still open over the page: keep the capture, flag it.
                 covering = [d.title or d.class_name for d in self.adapter.list_dialogs(rect)
@@ -625,6 +640,7 @@ class Harness:
         nav_s = time.monotonic() - t_nav
         t_loop, pages_done = time.monotonic(), 0
         t_prev, timers_prev = time.monotonic(), dict(self._timers)
+        observed: Optional[ViewState] = None
         while True:
             self.estop.check()
             if self.deadline is not None and time.monotonic() > self.deadline:
@@ -636,7 +652,7 @@ class Harness:
                 self._end(EndReason.MAX_PAGES, f"max_pages={max_pages}", page - 1)
                 return
             t0 = time.monotonic()
-            cap = self._capture_page(page)
+            cap = self._capture_page(page, observed)
             cap_s = time.monotonic() - t0
             self._save_page(page, cap, nav_flags, {"navigation_s": round(nav_s, 3), "capture_s": round(cap_s, 3)})
             if self.pipeline is not None:
@@ -664,6 +680,7 @@ class Harness:
             nav_flags = self._advance_from(page, state)
             if nav_flags is None:
                 return
+            observed = self._last_view
             nav_s = time.monotonic() - t_nav
             page += 1
 

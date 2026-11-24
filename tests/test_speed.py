@@ -72,7 +72,7 @@ def test_default_timings_capture_pages_well_under_10_seconds(doc, tmp_path):
     t0 = time.monotonic()
     assert h.run() == EXIT_OK
     per_page = (time.monotonic() - t0) / 6
-    assert per_page < 4.0, per_page
+    assert per_page < 2.2, per_page          # includes start-up over 6 pages; was ~2.7 s/page
     log = [json.loads(line) for line in (tmp_path / "r" / "logs" / "harness.jsonl").read_text().splitlines()]
     prog = [e for e in log if e["event"] == "progress"]
     assert len(prog) == 6 and all(e["seconds"] < 10 for e in prog)
@@ -80,3 +80,16 @@ def test_default_timings_capture_pages_well_under_10_seconds(doc, tmp_path):
     m = json.loads((tmp_path / "r" / "manifest.json").read_text())
     assert set(m["timings"]["capture_breakdown_s"]) >= {"render_wait", "dialog_checks", "page_number"}
     print(f"{per_page:.2f} s/page with default timings")
+
+
+def test_acrobat_taskbar_pin_is_not_a_focus_steal(monkeypatch):
+    """Acrobat's own taskbar pin pop-up holding the foreground is not another program taking focus."""
+    from doc_capture_harness.viewers import win32 as w32
+    ad = w32.Win32ViewerAdapter.__new__(w32.Win32ViewerAdapter)
+    ad.pid = 5940
+    monkeypatch.setattr(w32.pw, "foreground_window", lambda: 197320)
+    monkeypatch.setattr(w32.pw, "get_class_name", lambda h: "AcrobatTaskbarPinWnd")
+    monkeypatch.setattr(w32.pw, "window_pid", lambda h: 5940)
+    assert ad.foreground_is_transient()
+    monkeypatch.setattr(w32.pw, "window_pid", lambda h: 1234)      # a different process: a real steal
+    assert not ad.foreground_is_transient()

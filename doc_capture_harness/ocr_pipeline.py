@@ -32,7 +32,8 @@ WidthFn = Callable[[int, int, int], Optional[float]]
 
 
 def default_workers() -> int:
-    return max(1, min(8, (os.cpu_count() or 2) - 1))
+    # Tesseract runs at below-normal priority, so capture keeps CPU even with one worker per core.
+    return max(1, min(8, os.cpu_count() or 1))
 
 
 def _job(n: int, png: str, cfg: HarnessConfig, paths: RunPaths, width_pt: Optional[float]) -> dict:
