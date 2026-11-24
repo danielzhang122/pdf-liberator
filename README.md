@@ -29,7 +29,8 @@ It is meant for documents whose real content only appears after the reader runs 
 The batch runs **unattended**:
 
 - Anything that needs a person, such as an unknown dialog, a wrong page layout, or failed navigation, sets that document aside as `needs_attention` and the batch moves on.
-- Drag the same folder onto `Capture.bat` again to retry. Finished documents are skipped, interrupted ones resume where they stopped, and the set-aside ones are retried.
+- Drag the same files or folder onto `Capture.bat` again to continue. Finished documents are skipped, interrupted ones resume where they stopped, and the set-aside ones are retried. If some documents are already finished, `Capture.bat` lists them and asks `Redo them (capture again)? [y/N]`. Answer **y** to capture them from scratch, for example when a pop-up or another window got into the screenshots.
+- A **progress page** opens in your browser by itself, with **pause**, **play** and **stop** buttons (see [Watching progress](#watching-progress-and-using-the-pc-meanwhile)).
 - Stop at any time with **Ctrl+Shift+F12**.
 
 The same from a terminal:
@@ -80,6 +81,10 @@ python -m doc_capture_harness batch list.csv --out D:\OCR    # an explicit list
 python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be processed
 ```
 
+```powershell
+python -m doc_capture_harness batch C:\Docs --redo          # capture finished documents again
+```
+
 - **Inputs:** folders (recursive by default; `--no-recursive` turns that off), individual files, a `.txt` list (one path per line), or a `.csv` with a `path` column and optional `known_pages` and `lang` columns. A known page count per document makes end-of-document detection exact. Existing `*.ocr.pdf` outputs are never picked up as inputs.
 - **Outputs** go to two folders. The output folder (default `<input>\ocr_output`) holds only the searchable PDFs (`<name>.ocr.pdf`), mirroring the input sub-folders. Everything else goes to a sibling folder `<out>_details` (default `<input>\ocr_output_details`): `<name>.ocr.txt`, `batch_summary.csv`, `batch_summary.md`, and `_runs\`, which holds the full run folders (pages, report, logs, diagnostics) and `batch.json`. Name clashes get a short unique suffix.
 - **Statuses:**
@@ -89,16 +94,19 @@ python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be
   - `failed`: an error.
   - `stopped`: emergency stop.
 - **Re-running is safe and incremental.** A document is skipped only if its SHA-256 is unchanged and its output exists. A changed document starts over; the old run is kept, renamed.
+  - **Redo:** `--redo` (or answer **y** to `Capture.bat`'s "Redo them?" prompt) captures finished documents again from scratch. The old run folder is kept next to the new one with a `.replaced-<timestamp>` suffix, and the searchable PDF is overwritten.
 - **Unattended vs interactive:**
   - Default is unattended: no pop-ups after the start. The reader setup reminder is shown once at the start; `--no-prompt` skips it for scheduled runs.
   - `--interactive` pauses on problems with a message box instead, which suits a first run on a new kind of document.
-- **Stopping:** press Ctrl+Shift+F12, or create a file named `STOP` in `<out>_details\_runs\`. Either stops the whole batch after the current step.
+- **Stopping:** press Ctrl+Shift+F12, click **stop** on the progress page, or create a file named `STOP` in `<out>_details\_runs\`. Any of these stops the whole batch after the current step. Re-running continues where it stopped.
+- **Pausing:** click **pause** on the progress page to wait before the next page (or the next document), so you can use the PC. Click **play** to bring the reader back to the front and continue. Without the browser, create a file named `PAUSE` in `<out>_details\_runs\` to pause and delete it to continue.
 - **Time limit:** `--time-limit 240` stops a document whose capture runs over 240 minutes (resumable), so one stuck document cannot hold up the batch.
-- **Options for every document:** `--config my.yaml` applies a configuration to every document. Also available: `--lang eng+deu`, `--workers N`, `--max-pages N`, `--no-pdf`.
+- **Options for every document:** `--config my.yaml` applies a configuration to every document. Also available: `--lang eng+deu`, `--workers N`, `--max-pages N`, `--no-pdf`, `--redo` (capture finished documents again), `--no-dashboard` (turn off the progress page).
 
 ## Watching progress and using the PC meanwhile
 
-- **Progress page:** in a second window run `python -m doc_capture_harness dashboard <run or output folder>`. A browser page shows captured / expected pages, OCR progress and pages needing review for every run under that folder, refreshing every 2 s (localhost only, read-only).
+- **Progress page:** `batch` opens it in your browser automatically at `http://127.0.0.1:8765/` (or another free port; the URL is printed in the console). It shows each document's progress: pages captured / expected, OCR done, and pages needing review. The **pause**, **play** and **stop** buttons control the batch as described under [Batch processing](#batch-processing). Use `--no-dashboard` to turn the page off.
+- **Standalone:** `python -m doc_capture_harness dashboard <run or output folder>` opens the same page for any folder, in a second window. Its buttons write `PAUSE` and `STOP` files in that folder. It refreshes every 2 s and is localhost only.
 - **Background mode:** add `--background` (or `capture.background: true`) to capture the reader window with PrintWindow and send navigation keys straight to it, so the harness never takes focus or moves the mouse. Keep the reader window open (not minimized). Limits: modifier shortcuts (e.g. Ctrl+0) may be ignored, page-box navigation is off (use `goto_method: dialog`), PDF-XChange may ignore posted keys, and GPU-rendered readers can produce black frames. Not yet verified on Acrobat or PDF-XChange.
 
 ## Large documents
@@ -425,7 +433,7 @@ python -m doc_capture_harness ocr --run-dir runs\contract-v3 --redo
 python -m doc_capture_harness report --run-dir runs\contract-v3 --print
 ```
 
-**Emergency stop:** press **Ctrl+Shift+F12**, create a file named `STOP` in the run directory, press Ctrl+C in the console, or (while a pyautogui fallback action runs) move the mouse into a screen corner. The run stops before its next keystroke or capture, saves its state, and can be resumed.
+**Emergency stop:** press **Ctrl+Shift+F12**, click **stop** on the progress page, create a file named `STOP` in the run directory, press Ctrl+C in the console, or (while a pyautogui fallback action runs) move the mouse into a screen corner. The run stops before its next keystroke or capture, saves its state, and can be resumed.
 
 ---
 
@@ -600,7 +608,7 @@ The tests cover:
 - stability detection, page cropping, overlap stitching and duplicate hashing
 - the prompt policy, including security acknowledgement, unknown dialogs, obstructions and `max_times`
 - end-to-end simulated runs: indicator-driven ends, identical pages, the no-indicator end probe, known-page-count checkpoints, flaky navigation, the `max_pages` limit, dialogs, emergency stop with resume, refusal to resume a changed document, scroll-mode stitching, unattended abort, and real OCR when Tesseract is installed
-- scale and automation: batch processing (skip finished documents, retry ones set aside, mirrored outputs), the batch-wide STOP file, CSV inputs, a 600-page document with flat per-page cost, page records surviving a stale header, chunked PDF merging, page PDFs reused from the OCR pass, layout detection (continuous and zoomed), and the per-document time limit
+- scale and automation: batch processing (skip finished documents or redo them on request, retry ones set aside, mirrored outputs, progress page with pause/play/stop), the batch-wide STOP file, CSV inputs, a 600-page document with flat per-page cost, page records surviving a stale header, chunked PDF merging, page PDFs reused from the OCR pass, layout detection (continuous and zoomed), and the per-document time limit
 - searchable PDF output: text layer extraction, page size and metadata from the original, encrypted originals left encrypted, refusal to overwrite the original, writing next to the original with overwrite protection, placeholder pages, and the image-only fallback
 
 ### Real Acrobat Reader benchmark

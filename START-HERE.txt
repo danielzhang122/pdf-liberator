@@ -17,8 +17,13 @@ Results appear next to your files, in two folders:
    ocr_output_details\<name>.ocr.txt    text
    ocr_output_details\batch_summary.md  status of every document
 
+A progress page opens in your browser by itself. Its pause, play and stop buttons
+control the run (pause lets you use the PC; play continues).
+
 Stop at any time: Ctrl+Shift+F12. Drag the same files onto Capture.bat again to
-continue; finished documents are skipped.
+continue; finished documents are skipped unless you choose to redo them:
+If Capture.bat asks "Redo them (capture again)? [y/N]", answer y to capture those
+documents from scratch (e.g. when a pop-up got into the screenshots).
 
 Problems? Double-click Capture.bat once (it runs setup and a check), or see README.md.
 Only use this on documents you own or are authorised to process.

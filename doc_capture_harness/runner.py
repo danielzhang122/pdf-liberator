@@ -58,7 +58,7 @@ class Harness:
     def __init__(self, cfg: HarnessConfig, run_dir: Path, adapter_factory: AdapterFactory,
                  source_factory: SourceFactory, *, resume: bool = False, force: bool = False,
                  responder: Optional[Callable[[str, str], str]] = None, skip_ocr: bool = False,
-                 skip_pdf: bool = False, extra_stop_files: tuple = ()):
+                 skip_pdf: bool = False, extra_stop_files: tuple = (), pause_files: tuple = ()):
         self.cfg = cfg
         self.paths = RunPaths(Path(run_dir))
         self.paths.ensure()
@@ -71,6 +71,8 @@ class Harness:
         self.skip_pdf = skip_pdf
         self.estop = EmergencyStopMonitor(cfg.safety.estop_hotkey, self.paths.root / cfg.safety.stop_file_name,
                                           extra_stop_files=tuple(extra_stop_files))
+        # Pause files: the run's own PAUSE file first, then any extra ones given by the caller.
+        self.pause_files = (self.paths.root / "PAUSE",) + tuple(pause_files)
         self.manifest: Optional[Manifest] = None
         self.checkpoint = ManualCheckpoint(cfg.manual, self.estop, diagnostics=self.save_diagnostics,
                                            record=lambda r: self._record_event("manual_checkpoints", r),
@@ -266,6 +268,33 @@ class Harness:
     def _dialogs(self, rect: Optional[Rect]) -> int:
         with self._timed("dialog_checks"):
             return self.prompts.handle(rect)
+
+    def _wait_if_paused(self) -> bool:
+        """Hold the capture while a PAUSE file exists (ours or an extra one). The emergency
+        stop still works during the wait. True if the run was paused (the caller must then
+        observe the page again, since the operator may have changed it)."""
+        if not any(f.exists() for f in self.pause_files):
+            return False
+        event(self.log, "paused", "paused by PAUSE file; delete it (or press Play) to continue")
+        self.manifest.data["paused"] = True
+        self.manifest.save()
+        t_pause = time.monotonic()
+        try:
+            while any(f.exists() for f in self.pause_files):
+                self.estop.sleep(0.5)
+        finally:
+            # Time spent paused does not count toward the document time limit, and the flag is
+            # cleared even when an emergency stop ends the wait (the stop still propagates).
+            if self.deadline is not None:
+                self.deadline += time.monotonic() - t_pause
+            self.manifest.data["paused"] = False
+            self.manifest.save()
+        event(self.log, "resumed", "pause cleared; continuing")
+        try:
+            self.adapter.bring_to_foreground()
+        except Exception as exc:  # noqa: BLE001 - best effort
+            event(self.log, "focus_restore_failed", str(exc), level=10)
+        return True
 
     def _observe(self) -> ViewState:
         res = self._stable()
@@ -643,6 +672,8 @@ class Harness:
         observed: Optional[ViewState] = None
         while True:
             self.estop.check()
+            if self._wait_if_paused():
+                observed = None
             if self.deadline is not None and time.monotonic() > self.deadline:
                 raise UserAbort(f"document time limit of {self.cfg.document.time_limit_minutes} min reached "
                                 f"before page {page} (resume to continue)")
@@ -828,6 +859,10 @@ class Harness:
 
         t0 = time.monotonic()
         self.estop.start()
+        own_pause = self.pause_files[0]
+        if own_pause.exists():
+            # A stale PAUSE file from an earlier session must not hold a resumed run.
+            own_pause.unlink()
         code = EXIT_FAILED
         try:
             doc = self._prepare_document()

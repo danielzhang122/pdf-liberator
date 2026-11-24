@@ -351,6 +351,15 @@ def cmd_batch(args) -> int:
                   + (f"  (known pages {it.known_pages})" if it.known_pages else ""))
         print(f"\n{len(items)} document(s). Output folder: {out}")
         return 0
+    if not args.no_dashboard:
+        try:
+            from .dashboard import start_in_background
+            runs = details_dir(out) / "_runs"
+            runs.mkdir(parents=True, exist_ok=True)
+            url = start_in_background(runs)
+            print(f"Progress page (pause / play / stop): {url}")
+        except Exception as exc:  # noqa: BLE001 - the page is optional; the batch still runs
+            print(f"warning: progress page unavailable ({exc}); the batch runs without it")
     _require_windows()
     _enable_dpi()
     raw = _resolve_viewer(_apply_overrides(load_raw(_config_path(args)), args))
@@ -362,13 +371,24 @@ def cmd_batch(args) -> int:
         print(f"\nBefore the batch starts:\n  {text}\n")
         print("The batch then runs unattended. Emergency stop: Ctrl+Shift+F12, or create a file named STOP in "
               f"{details_dir(out) / '_runs'}.")
+        print("Progress page: Pause / Play pauses between documents and during capture; Stop ends the batch.")
         try:
             input("Press Enter to start (Ctrl+C to cancel)... ")
         except EOFError:
             pass
 
     batch = Batch(raw, items, out, windows_factories, interactive=args.interactive, echo=echo_safe,
-                  setup_prompt=None if args.no_prompt else setup_prompt)
+                  setup_prompt=None if args.no_prompt else setup_prompt, redo=args.redo)
+    if not args.redo and not args.no_prompt and sys.stdin.isatty():
+        done = batch.already_done()
+        if done:
+            print("Already finished (capture again only if the old result is bad):")
+            for it in done:
+                print(f"  {it.path.name}")
+            try:
+                batch.redo = input("Redo them (capture again)? [y/N] ").strip().lower() in ("y", "yes")
+            except EOFError:
+                batch.redo = False
     return batch.run()
 
 
@@ -484,6 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--dry-run", action="store_true", help="list what would be processed, then exit")
     b.add_argument("--no-prompt", action="store_true",
                    help="do not wait for Enter before starting (scheduled/remote runs)")
+    b.add_argument("--no-dashboard", action="store_true", help="do not open the progress page")
+    b.add_argument("--redo", action="store_true",
+                   help="capture documents again even if they were already finished")
     b.set_defaults(func=cmd_batch)
 
     db = sub.add_parser("dashboard", help="open a live progress page in the browser (run in a second window)")

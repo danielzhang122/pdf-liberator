@@ -138,8 +138,9 @@ class Batch:
     def __init__(self, raw_cfg: dict, items: list[BatchItem], out_dir: Path,
                  factories: Callable, *, interactive: bool = False,
                  responder: Optional[Callable[[str, str], str]] = None, echo: Callable[[str], None] = print,
-                 setup_prompt: Optional[Callable[[str], None]] = None):
+                 setup_prompt: Optional[Callable[[str], None]] = None, redo: bool = False):
         self.raw = raw_cfg
+        self.redo = redo
         self.items = items
         self.out = Path(out_dir)
         self.details = details_dir(self.out)
@@ -208,12 +209,27 @@ class Batch:
         return bool(st) and st.get("sha256") == sha and st.get("status") in ("completed", "completed_with_warnings") \
             and Path(st.get("pdf") or "").exists()
 
+    def already_done(self) -> list[BatchItem]:
+        """Documents whose last attempt finished and whose file has not changed since."""
+        done = []
+        for item in self.items:
+            try:
+                sha = sha256_file(item.path)
+            except OSError:
+                continue
+            if self._finished(self.state["docs"].get(_slug(item.path)), sha):
+                done.append(item)
+        return done
+
     def run(self) -> int:
         self.out.mkdir(parents=True, exist_ok=True)
         self.runs.mkdir(parents=True, exist_ok=True)
         stop_file = self.runs / "STOP"
         if stop_file.exists():
             stop_file.unlink()        # stale from a previous stopped batch
+        pause_file = self.runs / "PAUSE"
+        if pause_file.exists():
+            pause_file.unlink()       # stale pause must not hold a new batch
         total = len(self.items)
         self.echo(f"Batch: {total} document(s) -> {self.out}"
                   f"{'' if self.interactive else '  (unattended: problems are skipped and listed)'}")
@@ -226,6 +242,10 @@ class Batch:
             if text:
                 self.setup_prompt(text)
         for i, item in enumerate(self.items, 1):
+            if pause_file.exists():
+                self.echo(f"Paused - press play on the progress page (or delete {pause_file})")
+                while pause_file.exists() and not stop_file.exists():
+                    time.sleep(0.5)
             if stop_file.exists():
                 stopped = True
                 self.echo("Batch stopped (STOP file). Run the same command again to continue.")
@@ -238,24 +258,31 @@ class Batch:
                 self._record(key, item, "failed", None, None, 0, detail=f"cannot read: {exc}")
                 self.echo(f"[{i}/{total}] {item.path.name}: cannot read ({exc})")
                 continue
-            if self._finished(st, sha):
+            redoing = self._finished(st, sha)
+            if redoing and not self.redo:
                 self.echo(f"[{i}/{total}] {item.path.name}: already done, skipping")
                 continue
             rd = self.runs / key
-            resume = (rd / "manifest.json").exists()
-            if resume and (not st or st.get("sha256") != sha):
+            resume = (rd / "manifest.json").exists() and not redoing
+            if redoing and rd.exists():
+                aside = rd.with_name(f"{rd.name}.replaced-{time.strftime('%Y%m%d-%H%M%S')}")
+                shutil.move(str(rd), str(aside))
+                self.echo(f"[{i}/{total}] {item.path.name}: redoing (old run kept in {aside.name})")
+            elif resume and (not st or st.get("sha256") != sha):
                 aside = rd.with_name(f"{rd.name}.replaced-{time.strftime('%Y%m%d-%H%M%S')}")
                 shutil.move(str(rd), str(aside))
                 resume = False
                 self.echo(f"[{i}/{total}] {item.path.name}: document changed since last attempt; starting over "
                           f"(old run kept in {aside.name})")
+            elif redoing:
+                self.echo(f"[{i}/{total}] {item.path.name}: redoing")
             self.echo(f"[{i}/{total}] {item.path.name}: {'resuming' if resume else 'starting'}")
             t0 = time.monotonic()
             try:
                 cfg, pdf_out, txt_out = self._doc_config(item, first)
                 af, sf = self.factories(cfg)
                 h = Harness(cfg, rd, af, sf, resume=resume, force=not resume, responder=self.responder,
-                            extra_stop_files=(stop_file,))
+                            extra_stop_files=(stop_file,), pause_files=(pause_file,))
                 code = h.run()
             except Exception as exc:  # noqa: BLE001 - one document must not end the batch
                 self._record(key, item, "failed", None, None, time.monotonic() - t0,
