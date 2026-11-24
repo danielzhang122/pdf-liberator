@@ -21,9 +21,9 @@ It is meant for documents whose real content only appears after the reader runs 
 **3. Capture.** Drag a PDF, several PDFs, or a whole folder onto **`Capture.bat`**. For each document you get:
 
 ```
-<input folder>\ocr_output\<name>.ocr.pdf     searchable PDF (page images + OCR text layer)
-<input folder>\ocr_output\<name>.ocr.txt     OCR text, "===== Page N =====" per page
-<input folder>\ocr_output\batch_summary.md   one line per document: status, pages, pages to review
+<input folder>\ocr_output\<name>.ocr.pdf                 searchable PDF (page images + OCR text layer)
+<input folder>\ocr_output_details\<name>.ocr.txt         OCR text, "===== Page N =====" per page
+<input folder>\ocr_output_details\batch_summary.md       one line per document: status, pages, pages to review
 ```
 
 The batch runs **unattended**:
@@ -81,7 +81,7 @@ python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be
 ```
 
 - **Inputs:** folders (recursive by default; `--no-recursive` turns that off), individual files, a `.txt` list (one path per line), or a `.csv` with a `path` column and optional `known_pages` and `lang` columns. A known page count per document makes end-of-document detection exact. Existing `*.ocr.pdf` outputs are never picked up as inputs.
-- **Outputs** mirror the input folder structure under the output folder (default `<input>\ocr_output`). Name clashes get a short unique suffix. Full run folders (pages, report, logs, diagnostics) are kept in `<out>\_runs\`. The summary is in `batch_summary.csv` / `batch_summary.md`.
+- **Outputs** go to two folders. The output folder (default `<input>\ocr_output`) holds only the searchable PDFs (`<name>.ocr.pdf`), mirroring the input sub-folders. Everything else goes to a sibling folder `<out>_details` (default `<input>\ocr_output_details`): `<name>.ocr.txt`, `batch_summary.csv`, `batch_summary.md`, and `_runs\`, which holds the full run folders (pages, report, logs, diagnostics) and `batch.json`. Name clashes get a short unique suffix.
 - **Statuses:**
   - `completed`: clean.
   - `completed_with_warnings`: some pages are flagged for review, or the end of the document was heuristic. The per-document `report.md` says which.
@@ -92,7 +92,7 @@ python -m doc_capture_harness batch C:\Docs --dry-run       # show what would be
 - **Unattended vs interactive:**
   - Default is unattended: no pop-ups after the start. The reader setup reminder is shown once at the start; `--no-prompt` skips it for scheduled runs.
   - `--interactive` pauses on problems with a message box instead, which suits a first run on a new kind of document.
-- **Stopping:** press Ctrl+Shift+F12, or create a file named `STOP` in `<out>\_runs\`. Either stops the whole batch after the current step.
+- **Stopping:** press Ctrl+Shift+F12, or create a file named `STOP` in `<out>_details\_runs\`. Either stops the whole batch after the current step.
 - **Time limit:** `--time-limit 240` stops a document whose capture runs over 240 minutes (resumable), so one stuck document cannot hold up the batch.
 - **Options for every document:** `--config my.yaml` applies a configuration to every document. Also available: `--lang eng+deu`, `--workers N`, `--max-pages N`, `--no-pdf`.
 

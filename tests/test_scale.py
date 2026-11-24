@@ -8,7 +8,7 @@ from PIL import Image
 from pypdf import PdfReader
 
 from conftest import fast_config, needs_tesseract
-from doc_capture_harness.batch import Batch, discover
+from doc_capture_harness.batch import Batch, details_dir, discover
 from doc_capture_harness.models import Flag
 from doc_capture_harness.pdf_output import merge_pdfs
 from doc_capture_harness.runner import EXIT_OK, EXIT_STOPPED, EXIT_WARNINGS, Harness
@@ -57,7 +57,7 @@ class Factories:
 
 
 def _summary(out):
-    with open(out / "batch_summary.csv", encoding="utf-8-sig") as fh:
+    with open(details_dir(out) / "batch_summary.csv", encoding="utf-8-sig") as fh:
         return {r["document"].replace("\\", "/").rsplit("/", 1)[-1]: r for r in csv.DictReader(fh)}
 
 
@@ -82,9 +82,10 @@ def test_batch_end_to_end_and_rerun(tmp_path):
     assert "needs attention (dialog)" in s["c.pdf"]["detail"]
     # Outputs mirror the input folder structure.
     assert (out / "a.ocr.pdf").exists() and (out / "sub" / "b.ocr.pdf").exists()
-    assert "Page 2" in (out / "a.ocr.txt").read_text()
+    assert "Page 2" in (details_dir(out) / "a.ocr.txt").read_text()
     assert len(PdfReader(str(out / "a.ocr.pdf")).pages) == 3
     assert not (out / "c.ocr.pdf").exists()
+    assert {p.suffix for p in out.rglob("*") if p.is_file()} == {".pdf"}  # PDFs only
     # Re-run: finished documents are skipped, the problem document is retried.
     dialog["on"] = False
     f.launched.clear()
@@ -100,7 +101,7 @@ def test_batch_stop_file_halts_whole_batch(tmp_path):
 
     def stop_on_2(n):
         if n == 2:
-            (out / "_runs" / "STOP").write_text("x")
+            (details_dir(out) / "_runs" / "STOP").write_text("x")
 
     f = Factories({"a.pdf": lambda: Scenario([make_page(i) for i in range(1, 5)], on_page_shown=stop_on_2),
                    "b.pdf": lambda: Scenario([make_page(1)])})
@@ -110,7 +111,7 @@ def test_batch_stop_file_halts_whole_batch(tmp_path):
     f.scenarios["a.pdf"] = lambda: Scenario([make_page(i) for i in range(1, 5)])
     code = Batch(raw, discover([str(folder)], exclude=out), out, f, echo=lambda m: None).run()
     assert code == EXIT_OK and f.launched == ["a.pdf", "a.pdf", "b.pdf"]
-    log = (out / "_runs").glob("a_*/logs/harness.jsonl")
+    log = (details_dir(out) / "_runs").glob("a_*/logs/harness.jsonl")
     assert "resuming: returning to page" in next(log).read_text()
 
 

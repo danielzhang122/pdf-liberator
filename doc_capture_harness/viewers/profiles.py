@@ -36,6 +36,16 @@ _ACROBAT_STRAY_GOTO = {
     "button": "Cancel",
     "max_times": 100000,
 }
+# Acrobat's accessibility pass on tagged/large PDFs; it closes itself when done.
+# Wait it out (Cancel could leave the text layer half-built); after max_times
+# polls (~10 min) the operator is asked.
+_ACROBAT_PREPARING = {
+    "name": "acrobat-preparing-document-for-reading",
+    "title_re": r"(?i)^preparing document for reading",
+    "action": "wait",
+    "wait_s": 1.0,
+    "max_times": 600,
+}
 _JS_MANUAL = {
     "name": "javascript-prompt-requires-operator",
     "text_re": r"(?i)javascript",
@@ -80,7 +90,7 @@ PROFILES: dict[str, dict] = {
             "that cover the page (they stay closed). Make sure no other Acrobat window "
             "covers the screen."
         ),
-        "_prompt_rules": [_ACROBAT_TOOLBARS, _ACROBAT_STRAY_GOTO, _JS_MANUAL, _SAVE_CHANGES_NO],
+        "_prompt_rules": [_ACROBAT_TOOLBARS, _ACROBAT_STRAY_GOTO, _ACROBAT_PREPARING, _JS_MANUAL, _SAVE_CHANGES_NO],
     },
     "pdfxchange": {
         "executable_candidates": [

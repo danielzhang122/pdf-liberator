@@ -336,7 +336,7 @@ def cmd_calibrate(args) -> int:
 
 
 def cmd_batch(args) -> int:
-    from .batch import Batch, default_output_dir, discover, echo_safe
+    from .batch import Batch, default_output_dir, details_dir, discover, echo_safe
 
     out = Path(args.out) if args.out else default_output_dir(args.inputs)
     items = discover(args.inputs, recursive=not args.no_recursive, exclude=out)
@@ -359,7 +359,7 @@ def cmd_batch(args) -> int:
     def setup_prompt(text: str) -> None:
         print(f"\nBefore the batch starts:\n  {text}\n")
         print("The batch then runs unattended. Emergency stop: Ctrl+Shift+F12, or create a file named STOP in "
-              f"{out / '_runs'}.")
+              f"{details_dir(out) / '_runs'}.")
         try:
             input("Press Enter to start (Ctrl+C to cancel)... ")
         except EOFError:

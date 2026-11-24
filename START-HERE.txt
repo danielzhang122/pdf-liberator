@@ -12,10 +12,10 @@ Document Capture + OCR - quick start
    - Then it opens each document in your reader and captures every page.
      Leave the computer alone while it runs (no locking, no sleep).
 
-Results appear in an "ocr_output" folder next to your files:
-   <name>.ocr.pdf      searchable PDF
-   <name>.ocr.txt      text
-   batch_summary.md    status of every document
+Results appear next to your files, in two folders:
+   ocr_output\<name>.ocr.pdf            searchable PDF
+   ocr_output_details\<name>.ocr.txt    text
+   ocr_output_details\batch_summary.md  status of every document
 
 Stop at any time: Ctrl+Shift+F12. Drag the same files onto Capture.bat again to
 continue; finished documents are skipped.

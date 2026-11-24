@@ -7,9 +7,10 @@ For each document the normal harness run is performed (capture -> OCR ->
 searchable PDF -> report) and the results are written to the output folder:
 
     <out>/<same sub-folders>/<name>.ocr.pdf   searchable PDF
-    <out>/<same sub-folders>/<name>.ocr.txt   OCR text
-    <out>/batch_summary.csv / .md             one row per document
-    <out>/_runs/<name>_<id>/                  full run directory (pages, report, logs)
+    <out>_details/<same sub-folders>/<name>.ocr.txt   OCR text
+    <out>_details/batch_summary.csv / .md     one row per document
+    <out>_details/_runs/<name>_<id>/          full run directory (pages, report, logs)
+The output folder itself holds only the searchable PDFs.
 
 Behaviour:
 * Unattended by default: anything needing a person (unknown dialog, failed
@@ -54,7 +55,7 @@ def _is_candidate(p: Path) -> bool:
 def discover(inputs: list[str], recursive: bool = True, exclude: Optional[Path] = None) -> list[BatchItem]:
     """Expand folders, CSV/TXT lists and single files into batch items."""
     items: list[BatchItem] = []
-    excl = exclude.resolve() if exclude else None
+    excls = [exclude.resolve(), details_dir(exclude).resolve()] if exclude else []
 
     def add(path: Path, rel: Path, known=None, lang=None):
         items.append(BatchItem(path.resolve(), rel.with_suffix(""), known, lang))
@@ -64,7 +65,7 @@ def discover(inputs: list[str], recursive: bool = True, exclude: Optional[Path] 
         if p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
             for f in sorted(it, key=lambda x: str(x).lower()):
-                if excl and (f.resolve() == excl or excl in f.resolve().parents):
+                if any(f.resolve() == e or e in f.resolve().parents for e in excls):
                     continue
                 if _is_candidate(f):
                     add(f, f.relative_to(p))
@@ -117,6 +118,11 @@ def _slug(path: Path) -> str:
     return f"{stem}_{_short(path)}"
 
 
+def details_dir(out: Path) -> Path:
+    """Everything that is not a searchable PDF (text, summaries, run folders)."""
+    return Path(out).parent / (Path(out).name + "_details")
+
+
 def default_output_dir(inputs: list[str]) -> Path:
     if len(inputs) == 1:
         p = Path(inputs[0].strip('"')).expanduser().resolve()
@@ -136,7 +142,8 @@ class Batch:
         self.raw = raw_cfg
         self.items = items
         self.out = Path(out_dir)
-        self.runs = self.out / "_runs"
+        self.details = details_dir(self.out)
+        self.runs = self.details / "_runs"
         self.factories = factories
         self.interactive = interactive
         self.responder = responder
@@ -155,11 +162,11 @@ class Batch:
         self.state["updated"] = now_iso()
         atomic_write_json(self.state_path, self.state)
         rows = [d["row"] for d in self.state["docs"].values() if d.get("row")]
-        with open(self.out / "batch_summary.csv.tmp", "w", newline="", encoding="utf-8-sig") as fh:
+        with open(self.details / "batch_summary.csv.tmp", "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.DictWriter(fh, fieldnames=SUMMARY_FIELDS)
             w.writeheader()
             w.writerows(rows)
-        Path(self.out / "batch_summary.csv.tmp").replace(self.out / "batch_summary.csv")
+        Path(self.details / "batch_summary.csv.tmp").replace(self.details / "batch_summary.csv")
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
@@ -170,13 +177,13 @@ class Batch:
         for r in rows:
             md.append(f"| {r['document']} | {r['status']} | {r['pages']} | {r['pages_needing_review']} | "
                       f"{r['end_reason']} | {r['ocr_mean_conf']} | {r['minutes']} | {r['detail']} |")
-        atomic_write_text(self.out / "batch_summary.md", "\n".join(md) + "\n")
+        atomic_write_text(self.details / "batch_summary.md", "\n".join(md) + "\n")
 
     # ------------------------------------------------------------------ per document
     def _doc_config(self, item: BatchItem, first: bool):
         raw = copy.deepcopy(self.raw)
         pdf_out = self.out / item.rel_out.with_name(item.rel_out.name + ".ocr.pdf")
-        txt_out = self.out / item.rel_out.with_name(item.rel_out.name + ".ocr.txt")
+        txt_out = self.details / item.rel_out.with_name(item.rel_out.name + ".ocr.txt")
         over = {
             "document": {"path": str(item.path)},
             "viewer": {"close_on_finish": True},
@@ -273,7 +280,7 @@ class Batch:
         self._save()
         rows = [d["row"] for d in self.state["docs"].values() if d.get("row")]
         bad = [r for r in rows if r["status"] not in ("completed",)]
-        self.echo(f"\nSummary: {self.out / 'batch_summary.md'}")
+        self.echo(f"\nSummary: {self.details / 'batch_summary.md'}")
         for r in bad:
             self.echo(f"  {r['status']:<24} {r['document']}  {r['detail']}")
         if stopped:
